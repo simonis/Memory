@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!--[if IE]><meta http-equiv="X-UA-Compatible" content="IE=edge"><![endif]-->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="generator" content="Asciidoctor 1.5.6.1">
+<title>Linux Process Layout</title>
+<link rel="stylesheet" href="./styles/riak.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css">
+<link rel="stylesheet" href="./styles/pygments-manni.css">
+</head>
+<body class="article">
+<div id="header">
+<h1><a href="https://github.com/simonis/Memory">Linux Process Layout</a></h1>
+</div>
+<div id="content">
+<div id="preamble">
+<div class="sectionbody">
+<div class="paragraph">
+<p>This is a tiny writeup (mostly for me such that I don&#8217;t forget about it :) how a simple, 64-bit Linux process is laid out in memory and how a processes memory consumption can be analyzed. A future article will then focus on the native memory layout and consumption of a Java process.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_where_it_all_begins_i_e_code_execve_code">Where it all begins.. (i.e. <code>execve()</code>)</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Let&#8217;s start our journey with the execution of the standard C-library function <a href="http://pubs.opengroup.org/onlinepubs/9699919799/functions/exec.html"><code>execve()</code></a> which in turn executes the <a href="https://elixir.bootlin.com/linux/v4.18.5/source/fs/exec.c#L1963"><code>execve</code></a> system call. <code>execve</code> is usually called right after <code>fork()</code> and replaces (i.e. overlays) the old programs stack, heap and data segments with the ones of the new program (<a href="http://man7.org/linux/man-pages/man2/execve.2.html">see the man page of <code>execve(2)</code></a>).</p>
+</div>
+</div>
+</div>
+</div>
+<div id="footer">
+<div id="footer-text">
+Last updated 2018-08-27 19:11:02 CEST
+</div>
+</div>
+</body>
+</html>
