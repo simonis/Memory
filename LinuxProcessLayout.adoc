@@ -1,4 +1,5 @@
-= https://github.com/simonis/Memory[Linux Process Layout]
+= Linux Process Layout
+Volker Simonis
 :toc:
 :toc-placement!:
 :source-highlighter: pygments
@@ -13,6 +14,22 @@ endif::[]
 
 This is a tiny writeup (mostly for me such that I don't forget about it :) how a simple, 64-bit Linux process is laid out in memory and how a processes memory consumption can be analyzed. A future article will then focus on the native memory layout and consumption of a Java process.
 
-== Where it all begins.. (i.e. `execve()`)
+== The basics
 
-Let's start our journey with the execution of the standard C-library function http://pubs.opengroup.org/onlinepubs/9699919799/functions/exec.html[`execve()`] which in turn executes the https://elixir.bootlin.com/linux/v4.18.5/source/fs/exec.c#L1963[`execve`] system call. `execve` is usually called right after `fork()` and replaces (i.e. overlays) the old programs stack, heap and data segments with the ones of the new program (http://man7.org/linux/man-pages/man2/execve.2.html[see the man page of `execve(2)`]).
+The precesses memory space layout is platform specific. On current x86_64 CPU's the memory will be laid out according to "virtual memory map with 4 level page tables" which is specified in the Linux kernel documentation under https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt[`Documentation/x86/x86_64/mm.txt`]:
+
+```
+0000000000000000 - 00007fffffffffff (=47 bits) user space, different per mm
+hole caused by [47:63] sign extension
+ffff800000000000 - ffff87ffffffffff (=43 bits) guard hole, reserved for hypervisor
+ffff880000000000 - ffffc7ffffffffff (=64 TB) direct mapping of all phys. memory
+...
+ffffffffff600000 - ffffffffff600fff (=4 kB) legacy vsyscall ABI
+ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole
+```
+
+As you can see, this gives us a virtual address space of 48 bits where 47 bits can be used for user space programs to address at most 128 TB of memory. Because this article focuses on the user space, I've omitted most of the predefined kernel space regions. It's just interesting to see, that the kernel maps the complete physical memory into the kernel address space for convenience. Notice, that current x86_64 CPUs can only address a maximum of 64 TB because they https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961[limit the physical addresses to 46 bits]. Future versions of x86_64 CPUs will be able to use 57 bits for the virtual address space (resulting in a 56 bits or 128 PiB user space) and up to https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961[52 bits for physical addresses] (resulting in up to 4 PiB of physical memory). This new hardware generation requires an extended, https://lwn.net/Articles/717293/[5-level page table] as described in Intel's https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf["5-Level Paging and 5-Level EPT"] white paper and recently implemented in the Linux https://lwn.net/Articles/716916/[4.12 kernel]. The resulting, new virtual memory map is described in the previously mentioned https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt[`mm.txt`] kernel documentation file as well.
+
+== Where it all starts...
+
+Let's now start our journey with the execution of the standard C-library function http://pubs.opengroup.org/onlinepubs/9699919799/functions/exec.html[`execve()`] which in turn executes the https://elixir.bootlin.com/linux/v4.18.5/source/fs/exec.c#L1963[`execve` system call]. `execve` is usually called right after `fork()` and replaces (i.e. overlays) the old programs stack, heap and data segments with the ones of the new program (http://man7.org/linux/man-pages/man2/execve.2.html[see the man page of `execve(2)`]).
