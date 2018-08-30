@@ -6,14 +6,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 1.5.6.1">
 <meta name="author" content="Volker Simonis">
-<title>Linux Process Layout</title>
+<title>The Memory Layout of a 64-bit Linux Process</title>
 <link rel="stylesheet" href="./styles/colony.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css">
 <link rel="stylesheet" href="./styles/pygments-manni.css">
+<link rel="stylesheet" href="/media/sf_C_DRIVE/Users/D046063/public_html/hotspot/Memory/git/docs/styles/twemoji-awesome.css">
 </head>
 <body class="article">
 <div id="header">
-<h1>Linux Process Layout</h1>
+<h1>The Memory Layout of a 64-bit Linux Process</h1>
 <div class="details">
 <span id="author" class="author">Volker Simonis</span><br>
 </div>
@@ -34,17 +35,36 @@
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="pygments highlight"><code>0000000000000000 - 00007fffffffffff (=47 bits) user space, different per mm
+<pre class="pygments highlight nowrap"><code>0000000000000000 - 00007fffffffffff (=47 bits) user space, different per mm
 hole caused by [47:63] sign extension
 ffff800000000000 - ffff87ffffffffff (=43 bits) guard hole, reserved for hypervisor
-ffff880000000000 - ffffc7ffffffffff (=64 TB) direct mapping of all phys. memory
+ffff880000000000 - ffffc7ffffffffff (=64 TB) direct mapping of all phys. memory <i class="conum" data-value="1"></i><b>(1)</b>
 ...
 ffffffffff600000 - ffffffffff600fff (=4 kB) legacy vsyscall ABI
 ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole</code></pre>
 </div>
 </div>
 <div class="paragraph">
-<p>As you can see, this gives us a virtual address space of 48 bits where 47 bits can be used for user space programs to address at most 128 TB of memory. Because this article focuses on the user space, I&#8217;ve omitted most of the predefined kernel space regions. It&#8217;s just interesting to see, that the kernel maps the complete physical memory into the kernel address space for convenience. Notice, that current x86_64 CPUs can only address a maximum of 64 TB because they <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">limit the physical addresses to 46 bits</a>. Future versions of x86_64 CPUs will be able to use 57 bits for the virtual address space (resulting in a 56 bits or 128 PiB user space) and up to <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">52 bits for physical addresses</a> (resulting in up to 4 PiB of physical memory). This new hardware generation requires an extended, <a href="https://lwn.net/Articles/717293/">5-level page table</a> as described in Intel&#8217;s <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf">"5-Level Paging and 5-Level EPT"</a> white paper and recently implemented in the Linux <a href="https://lwn.net/Articles/716916/">4.12 kernel</a>. The resulting, new virtual memory map is described in the previously mentioned <a href="https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt"><code>mm.txt</code></a> kernel documentation file as well.</p>
+<p>As you can see, this gives us a virtual address space of 48 bits where 47 bits can be used for user space programs to address at most 128 TB of memory. Because this article focuses on the user space, I&#8217;ve omitted most of the predefined kernel space regions. It&#8217;s just interesting to see &#x278a;, that the kernel maps the complete physical memory into the kernel address space for convenience. Notice, that current x86_64 CPUs can only address a maximum of 64 TB because they <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">limit the physical addresses to 46 bits</a>. Future versions of x86_64 CPUs will be able to use 57 bits for the virtual address space (resulting in a 56 bits or 128 PiB user space) and up to <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">52 bits for physical addresses</a> (resulting in up to 4 PiB of physical memory). This new hardware generation requires an extended, <a href="https://lwn.net/Articles/717293/">5-level page table</a> as described in Intel&#8217;s <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf">"5-Level Paging and 5-Level EPT"</a> white paper and recently implemented in the Linux <a href="https://lwn.net/Articles/716916/">4.12 kernel</a>. The resulting, new virtual memory map is described in the previously mentioned <a href="https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt"><code>mm.txt</code></a> kernel documentation file as well.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_hello_world">Hello world&#8230;&#8203;</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>As a baseline example we take a slightly modified "Hello world" example as shown in Listing <a href="#Hello_world">Listing 1</a>. We simply add a call to <code>getchar()</code> at the end of the program &#x278a; such that we can easily analyze its memory layout.</p>
+</div>
+<div id="Hello_world" class="listingblock">
+<div class="title">Listing 1. The famous "Hello world example"</div>
+<div class="content">
+<pre class="pygments highlight nowrap"><code data-lang="c"><span></span><span class="tok-cp">#include</span> <span class="tok-cpf">&lt;stdio.h&gt;</span><span class="tok-cp"></span>
+
+<span class="tok-kt">int</span> <span class="tok-nf">main</span><span class="tok-p">(</span><span class="tok-kt">int</span> <span class="tok-n">argc</span><span class="tok-p">,</span> <span class="tok-kt">char</span> <span class="tok-o">**</span><span class="tok-n">argv</span><span class="tok-p">)</span> <span class="tok-p">{</span>
+  <span class="tok-n">printf</span><span class="tok-p">(</span><span class="tok-s">&quot;Hello world</span><span class="tok-se">\n</span><span class="tok-s">&quot;</span><span class="tok-p">);</span>
+  <span class="tok-n">getchar</span><span class="tok-p">();</span> <i class="conum" data-value="1"></i><b>(1)</b>
+<span class="tok-p">}</span></code></pre>
+</div>
 </div>
 </div>
 </div>
@@ -59,7 +79,7 @@ ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole</code></pre>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2018-08-28 19:35:57 CEST
+Last updated 2018-08-30 18:33:36 CEST
 </div>
 </div>
 </body>
