@@ -9,7 +9,38 @@
 <title>The Memory Layout of a 64-bit Linux Process</title>
 <link rel="stylesheet" href="./styles/colony.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css">
-<link rel="stylesheet" href="./styles/pygments-manni.css">
+<link rel="stylesheet" href="./styles/pygments-default.css">
+<style>
+/* Prevent output from being too light in console listing blocks */
+.listingblock .pygments .tok-go {
+  color: #000066;
+}
+/* Do not draw a background color and frame around inline code elements */
+:not(pre) > code {
+  color: inherit;
+  background-color: inherit;
+  border: none;
+  -webkit-border-radius: inherit;
+  border-radius: inherit;
+}
+code {
+  color: inherit;
+  background-color: inherit;
+  -webkit-border-radius: inherit;
+  border-radius: inherit;
+}
+/* Do not increase the font size for listing blocks on bigger screens */
+@media only screen and (min-width: 768px) {
+  .literalblock pre, .literalblock pre[class], .listingblock pre, .listingblock pre[class] {
+    font-size: 0.8125em;
+  }
+}
+@media only screen and (min-width: 1280px) {
+  .literalblock pre, .literalblock pre[class], .listingblock pre, .listingblock pre[class] {
+    font-size: 0.8125em;
+  }
+}
+</style>
 <link rel="stylesheet" href="/media/sf_C_DRIVE/Users/D046063/public_html/hotspot/Memory/git/docs/styles/twemoji-awesome.css">
 </head>
 <body class="article">
@@ -45,7 +76,7 @@ ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole</code></pre>
 </div>
 </div>
 <div class="paragraph">
-<p>As you can see, this gives us a virtual address space of 48 bits where 47 bits can be used for user space programs to address at most 128 TB of memory. Because this article focuses on the user space, I&#8217;ve omitted most of the predefined kernel space regions. It&#8217;s just interesting to see &#x278a;, that the kernel maps the complete physical memory into the kernel address space for convenience. Notice, that current x86_64 CPUs can only address a maximum of 64 TB because they <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">limit the physical addresses to 46 bits</a>. Future versions of x86_64 CPUs will be able to use 57 bits for the virtual address space (resulting in a 56 bits or 128 PiB user space) and up to <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">52 bits for physical addresses</a> (resulting in up to 4 PiB of physical memory). This new hardware generation requires an extended, <a href="https://lwn.net/Articles/717293/">5-level page table</a> as described in Intel&#8217;s <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf">"5-Level Paging and 5-Level EPT"</a> white paper and recently implemented in the Linux <a href="https://lwn.net/Articles/716916/">4.12 kernel</a>. The resulting, new virtual memory map is described in the previously mentioned <a href="https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt"><code>mm.txt</code></a> kernel documentation file as well.</p>
+<p>As you can see, this gives us a virtual address space of 48 bits where 47 bits can be used for user space programs, to address at most 128 TB of memory. Because this article focuses on the user space, I&#8217;ve omitted most of the predefined kernel space regions. It&#8217;s just interesting to see &#x278a;, that the kernel maps the complete physical memory into the kernel address space for convenience. Notice, that current x86_64 CPUs can only address a maximum of 64 TB because they <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">limit the physical addresses to 46 bits</a> (i.e. a program can use a virtual address space of 128 TB but only 64 TB out of the 128 can be physically mapped). Future versions of x86_64 CPUs will be able to use 57 bits for the virtual address space (resulting in a 56 bits or 128 PiB user space) and up to <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961">52 bits for physical addresses</a> (resulting in up to 4 PiB of physical memory). This new hardware generation requires an extended, <a href="https://lwn.net/Articles/717293/">5-level page table</a> as described in Intel&#8217;s <a href="https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf">"5-Level Paging and 5-Level EPT"</a> white paper and recently implemented in the Linux <a href="https://lwn.net/Articles/716916/">4.12 kernel</a>. The resulting, new virtual memory map is described in the previously mentioned <a href="https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt"><code>mm.txt</code></a> kernel documentation file as well.</p>
 </div>
 </div>
 </div>
@@ -66,6 +97,62 @@ ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole</code></pre>
 <span class="tok-p">}</span></code></pre>
 </div>
 </div>
+<div class="paragraph">
+<p>As demonstrated in Listing <a href="#Hello_world_pmap">Listing 2</a>, we will use the <a href="http://man7.org/linux/man-pages/man1/pmap.1.html"><code>pmap</code></a> utility to display the memory layout of a process. <code>pmap</code> is actually just a front-end for the memory map of a process as recorded in the <code>smaps</code> file of the <a href="http://man7.org/linux/man-pages/man5/proc.5.html"><code>proc file system</code></a>.</p>
+</div>
+<div id="Hello_world_pmap" class="listingblock">
+<div class="title">Listing 2. The memory layout of our "Hello world" example</div>
+<div class="content">
+<pre class="pygments highlight nowrap"><code data-lang="console"><span></span><span class="tok-gp">$</span> pmap -X <span class="tok-sb">`</span>pidof hello<span class="tok-sb">`</span>
+<span class="tok-go">14792:   ./examples/c/hello</span>
+<span class="tok-go">         Address Perm   Offset Device Inode Size  Rss Pss Referenced Anonymous Swap Locked Mapping</span>
+<span class="tok-go">        00400000 r-xp 00000000  00:26  2118    4    4   4          4         0    0      0 hello</span>
+<span class="tok-go">        00600000 r--p 00000000  00:26  2118    4    4   4          4         4    0      0 hello</span>
+<span class="tok-go">        00601000 rw-p 00001000  00:26  2118    4    4   4          4         4    0      0 hello</span>
+<span class="tok-go">    7ffff7a11000 r-xp 00000000  08:01  8106 1784  952   5        952         0    0      0 libc-2.19.so</span>
+<span class="tok-go">    7ffff7bcf000 ---p 001be000  08:01  8106 2048    0   0          0         0    0      0 libc-2.19.so</span>
+<span class="tok-go">    7ffff7dcf000 r--p 001be000  08:01  8106   16   16  16         16        16    0      0 libc-2.19.so</span>
+<span class="tok-go">    7ffff7dd3000 rw-p 001c2000  08:01  8106    8    8   8          8         8    0      0 libc-2.19.so</span>
+<span class="tok-go">    7ffff7dd5000 rw-p 00000000  00:00     0   20   12  12         12        12    0      0</span>
+<span class="tok-go">    7ffff7dda000 r-xp 00000000  08:01  8176  140  140   0        140         0    0      0 ld-2.19.so</span>
+<span class="tok-go">    7ffff7fdd000 rw-p 00000000  00:00     0   12   12  12         12        12    0      0</span>
+<span class="tok-go">    7ffff7ff4000 rw-p 00000000  00:00     0   16   12  12         12        12    0      0</span>
+<span class="tok-go">    7ffff7ff8000 r--p 00000000  00:00     0    8    0   0          0         0    0      0 [vvar]              </span><i class="conum" data-value="4"></i><b>(4)</b>
+<span class="tok-go">    7ffff7ffa000 r-xp 00000000  00:00     0    8    4   0          4         0    0      0 [vdso]              </span><i class="conum" data-value="3"></i><b>(3)</b>
+<span class="tok-go">    7ffff7ffc000 r--p 00022000  08:01  8176    4    4   4          4         4    0      0 ld-2.19.so</span>
+<span class="tok-go">    7ffff7ffd000 rw-p 00023000  08:01  8176    4    4   4          4         4    0      0 ld-2.19.so</span>
+<span class="tok-go">    7ffff7ffe000 rw-p 00000000  00:00     0    4    4   4          4         4    0      0</span>
+<span class="tok-go">    7ffffffde000 rw-p 00000000  00:00     0  136    8   8          8         8    0      0 [stack]</span>
+<span class="tok-go">    7ffffffff000 ---p 00000000  00:00     0    1    0   0          0         0    0      0 [kernel-guard-page] </span><i class="conum" data-value="1"></i><b>(1)</b>
+<span class="tok-go">ffffffffff600000 r-xp 00000000  00:00     0    4    0   0          0         0    0      0 [vsyscall]          </span><i class="conum" data-value="2"></i><b>(2)</b>
+<span class="tok-go">                                            ==== ==== === ========== ========= ==== ======</span>
+<span class="tok-go">                                            4224 1188  97       1188        88    0      0 KB</span></code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>If called only with a PID argument, the output of <code>pmap</code> will be more compact and only contain the <em>Address</em>, <em>Perm</em>, <em>Size</em> and <em>Mapping</em> columns. If called with <code>-X</code> or <code>-XX</code>, it will display more of / all off the information exposed by the kernel through <code>/proc/PID/smaps</code>. This content may vary across kernel versions. In our concrete example (with <code>-X</code>) the <em>Address</em> column contains the start address of a mapping. <em>Perm</em> displays the permission bits (<code>r</code> = read, <code>w</code> = write, <code>x</code> = execute, <code>p</code>/<code>s</code> = private/shared mapping). <em>Offset</em> contains the offset into the mapped file and will be zero for all non-file (i.e. <em>anonymous</em> mappings). The same holds true for the <em>Device</em> and <em>Inode</em> columns which are relevant for file mappings. The <em>Size</em> column contains the size of the memory mapping in kilobytes (notice however that the kernel can only map memory in chunks which are a multiple of the "kernel page size" - normally 4 KB on x86). The <em>RSS</em> ("Resident Set Size") column displays the amount of memory which is actually in RAM while the <em>PSS</em> (<a href="https://lwn.net/Articles/230975/">"Proportional Set Size"</a>) column is the amount of memory in RAM divided by the number of processes sharing it.</p>
+</div>
+<div class="paragraph">
+<p>As you can see, all the lines excluding the last one describe memory regions in user space. Notice that the last page of the user space (i.e. <code>0x7ffffffff000-0x7ffffffff000</code> &#x278a;) will not be displayed by <code>pmap</code> nor is it recorded in the corresponding <code>/proc/&lt;pid&gt;/smaps</code> file. As <a href="https://github.com/torvalds/linux/blob/b18cb64ead400c01bf1580eeba330ace51f8087d/arch/x86/include/asm/processor.h#L757">described in the kernel sources</a>, this special guard page (i.e. 4 KB) is an implementation detail only required on x86_64 CPUs (and included here for completeness).</p>
+</div>
+<div class="paragraph">
+<p>The last line (i.e. <code>0xffffffffff600000&#8230;&#8203;[vsyscall]</code> &#x278b;) refers to a 4 KB page in the kernel space which has been mapped into the user space. It is relict of an early and now deprecated implementation of so called <a href="https://lwn.net/Articles/446528/">"virtual system calls"</a>. Virtual system calls are used to speed up the implementation of certain system calls like <a href="http://man7.org/linux/man-pages/man5/gettimeofday.5.html"><code>gettimeofday()</code></a> which only need read access to certain kernel variables. The idea is to implement these system calls such that they don&#8217;t switch into kernel mode because the kernel maps the required data read-only into the user space memory. This is exactly what the <code>[vsyscall]</code> mapping is used for: it contains the code and the variables for the mentioned virtual system calls.</p>
+</div>
+<div class="paragraph">
+<p>Unfortunately the size of the <code>[vsyscall]</code> region is restricted to 4 KB and it&#8217;s location is fixed which is considered an unnecessarily security risk in the meantime. The <code>vsyscall</code> implementation has therefore been deprecated in favour of the new <a href="https://lwn.net/Articles/615809/"><code>vDSO</code></a> (i.e. "virtual Dynamic Shared Object") implementation. This is a small shared library which is exported by the kernel (see <a href="http://man7.org/linux/man-pages/man7/vdso.7.html"><code>vdso(7)</code></a>) and mapped into the user address space &#x278c;. With <code>vDSO</code> the kernel variables are mapped into an extra, read-only memory region called <code>[vvar]</code> &#x278d;. Both these regions have no size limitations and are subject to ASLR.</p>
+</div>
+<div class="admonitionblock important">
+<table>
+<tr>
+<td class="icon">
+<i class="fa icon-important" title="Important"></i>
+</td>
+<td class="content">
+In order to get comparable results, we have to switch of <em>Address Space Layout Randomization</em> (<a href="https://en.wikipedia.org/wiki/Address_space_layout_randomization">ASLR</a>) by executing <code>sudo sh -c "echo 0 &gt; /proc/sys/kernel/randomize_va_space"</code>. ASLR was added to the Linux kernel back in <a href="https://lwn.net/Articles/121845/">version 2.6</a>. It is a technique for hardening the OS against various attacks (i.e. the <a href="https://en.wikipedia.org/wiki/Return-to-libc_attack">"return to libc attack"</a>) which exploit memory corruption vulnerabilities in order to jump to well known code in the users address space. Randomizing the address where shared libraries, stacks, the heap and even the executable itself (if compiled with <code>-fPIE</code> and linked with <code>-pie</code>) are being loaded, makes it much more harder to effectively execute such attacks. But for our analysis, as well as during development (e.g. debugging) it is of course much more convenient, if the addresses of an executable remain constant across different runs.
+</td>
+</tr>
+</table>
+</div>
 </div>
 </div>
 <div class="sect1">
@@ -79,7 +166,7 @@ ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole</code></pre>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2018-08-30 18:33:36 CEST
+Last updated 2018-09-04 20:04:32 CEST
 </div>
 </div>
 </body>

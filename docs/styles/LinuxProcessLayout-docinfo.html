@@ -1,0 +1,31 @@
+<style>
+/* Prevent output from being too light in console listing blocks */
+.listingblock .pygments .tok-go {
+  color: #000066;
+}
+/* Do not draw a background color and frame around inline code elements */
+:not(pre) > code {
+  color: inherit;
+  background-color: inherit;
+  border: none;
+  -webkit-border-radius: inherit;
+  border-radius: inherit;
+}
+code {
+  color: inherit;
+  background-color: inherit;
+  -webkit-border-radius: inherit;
+  border-radius: inherit;
+}
+/* Do not increase the font size for listing blocks on bigger screens */
+@media only screen and (min-width: 768px) {
+  .literalblock pre, .literalblock pre[class], .listingblock pre, .listingblock pre[class] {
+    font-size: 0.8125em;
+  }
+}
+@media only screen and (min-width: 1280px) {
+  .literalblock pre, .literalblock pre[class], .listingblock pre, .listingblock pre[class] {
+    font-size: 0.8125em;
+  }
+}
+</style>
