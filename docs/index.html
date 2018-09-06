@@ -5,7 +5,7 @@
 <!--[if IE]><meta http-equiv="X-UA-Compatible" content="IE=edge"><![endif]-->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 1.5.6.1">
-<meta name="author" content="Volker Simonis, 2018-09-06 11:34:15 CEST">
+<meta name="author" content="Volker Simonis, 2018-09-06 18:45:42 CEST">
 <title>The Memory Layout of a 64-bit Linux Process</title>
 <link rel="stylesheet" href="./styles/colony.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.6.3/css/font-awesome.min.css">
@@ -47,7 +47,7 @@ code {
 <div id="header">
 <h1>The Memory Layout of a 64-bit Linux Process</h1>
 <div class="details">
-<span id="author" class="author">Volker Simonis, 2018-09-06 11:34:15 CEST</span><br>
+<span id="author" class="author">Volker Simonis, 2018-09-06 18:45:42 CEST</span><br>
 </div>
 </div>
 <div id="content">
@@ -130,7 +130,7 @@ ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole</code></pre>
 </div>
 </div>
 <div class="paragraph">
-<p>If called only with a PID argument, the output of <code>pmap</code> will be more compact and only contain the <em>Address</em>, <em>Perm</em>, <em>Size</em> and <em>Mapping</em> columns. If called with <code>-X</code> or <code>-XX</code>, it will display more of / all off the information exposed by the kernel through <code>/proc/PID/smaps</code>. This content may vary across kernel versions. In our concrete example (with <code>-X</code>) the <em>Address</em> column contains the start address of a mapping. <em>Perm</em> displays the permission bits (<code>r</code> = read, <code>w</code> = write, <code>x</code> = execute, <code>p</code>/<code>s</code> = private/shared mapping). <em>Offset</em> contains the offset into the mapped file and will be zero for all non-file (i.e. <em>anonymous</em> mappings). The same holds true for the <em>Device</em> and <em>Inode</em> columns which are relevant for file mappings. The <em>Size</em> column contains the size of the memory mapping in kilobytes (notice however that the kernel can only map memory in chunks which are a multiple of the "kernel page size" - normally 4 KB on x86). The <em>RSS</em> ("Resident Set Size") column displays the amount of memory which is actually in RAM while the <em>PSS</em> (<a href="https://lwn.net/Articles/230975/">"Proportional Set Size"</a>) column is the amount of memory in RAM divided by the number of processes sharing it.</p>
+<p>If called only with a PID argument, the output of <code>pmap</code> will be more compact and only contain the <em>Address</em>, <em>Perm</em>, <em>Size</em> and <em>Mapping</em> columns. If called with <code>-X</code> or <code>-XX</code>, it will display more of / all off the information exposed by the kernel through <code>/proc/PID/smaps</code>. This content may vary across kernel versions. In our concrete example (with <code>-X</code>) the <em>Address</em> column contains the start address of a mapping. <em>Perm</em> displays the permission bits (<code>r</code> = read, <code>w</code> = write, <code>x</code> = execute, <code>p</code>/<code>s</code> = private/shared mapping). <em>Offset</em> contains the offset into the mapped file and will be zero for all non-file (i.e. <em>anonymous</em> mappings). The same holds true for the <em>Device</em> and <em>Inode</em> columns which are relevant for file mappings only. The <em>Size</em> column contains the size of the memory mapping in kilobytes (notice however that the kernel can only map memory in chunks which are a multiple of the "kernel page size" - normally 4 KB on x86). The <em>RSS</em> ("Resident Set Size") column displays the amount of memory which is actually in RAM while the <em>PSS</em> (<a href="https://lwn.net/Articles/230975/">"Proportional Set Size"</a>) column is the amount of memory in RAM divided by the number of processes sharing it.</p>
 </div>
 <div class="paragraph">
 <p>As you can see, all the lines excluding the last one describe memory regions in user space. Notice that the last page of the user space (i.e. <code>0x7ffffffff000-0x7ffffffff000</code> &#x278a;) will not be displayed by <code>pmap</code> nor is it recorded in the corresponding <code>/proc/&lt;pid&gt;/smaps</code> file. As <a href="https://github.com/torvalds/linux/blob/b18cb64ead400c01bf1580eeba330ace51f8087d/arch/x86/include/asm/processor.h#L757">described in the kernel sources</a>, this special guard page (i.e. 4 KB) is an implementation detail only required on x86_64 CPUs (and included here for completeness).</p>
@@ -156,6 +156,25 @@ In order to get comparable results, we have to switch of <em>Address Space Layou
 </div>
 </div>
 <div class="sect1">
+<h2 id="_rss">RSS</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Files are read by the Linux kernel with a certain read-ahead which is device dependent and which can be configured with the <a href="http://man7.org/linux/man-pages/man5/blockdev.8.html"><code>blockdev(8)</code></a> command.</p>
+</div>
+<div id="blockdev" class="listingblock">
+<div class="title">Listing 3. Query the kernel and file system read-ahead with <code>blockdev</code></div>
+<div class="content">
+<pre class="pygments highlight nowrap"><code data-lang="console"><span></span><span class="tok-gp">$</span> sudo blockdev --getra --getfra /dev/sda1
+<span class="tok-go">256</span>
+<span class="tok-go">256</span></code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>According to the man page, the output is in 512-byte sectors so a value of 256 means a read-ahead of 128 KB.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
 <h2 id="_where_it_all_starts">Where it all starts&#8230;&#8203;</h2>
 <div class="sectionbody">
 <div class="paragraph">
@@ -166,7 +185,7 @@ In order to get comparable results, we have to switch of <em>Address Space Layou
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2018-09-06 11:34:15 CEST
+Last updated 2018-09-06 18:45:42 CEST
 </div>
 </div>
 </body>
