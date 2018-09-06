@@ -1,5 +1,5 @@
 = The Memory Layout of a 64-bit Linux Process
-Volker Simonis
+Volker Simonis, {docdate} {doctime}
 :toc:
 :toc-placement!:
 :source-highlighter: pygments
@@ -16,7 +16,15 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
+////
+Build command line:
+
+asciidoctor  -a pygments-stylesheet=manni -a linkcss -a stylesheet=colony.css -a stylesdir=./styles -a copycss=/share/Git/asciidoctor-stylesheet-factory/stylesheets/colony.css --destination-dir docs/ --out-file=index.html -r /share/Git/asciidoctor-extensions-lab/lib/emoji-inline-macro.rb -r /share/Git/asciidoctor-extensions-lab/lib/man-inline-macro.rb LinuxProcessLayout.adoc
+////
+
 This is a tiny writeup (mostly for me such that I don't forget about it :) how a simple, 64-bit Linux process is laid out in memory and how a processes memory consumption can be analyzed. A future article will then focus on the native memory layout and consumption of a Java process.
+
+ifdef::env-github[TIP: You can read a much more nicely formatted version at https://simonis.github.io/Memory]
 
 == The basics
 
