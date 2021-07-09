@@ -1,0 +1,635 @@
+= Releases unused heap memory back to the OS or How to make sense of all these numbers
+Volker Simonis, {docdate} {doctime}
+:toc:
+:toc-placement!:
+:source-highlighter: rouge
+:icons: font
+:listing-caption: Listing
+:xrefstyle: short
+:docinfo: shared
+:docinfodir: styles/
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+At startup the JVM determines values for the `InitialHeapSize` and `MaxHeapSize` based on the amount of system memory. These values can be inspected with `-XX:+PrintFlagsFinal`:
+
+ifdef::env-github[TIP: You can read a much more nicely formatted version at https://simonis.github.io/Memory/Uncommit.html]
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:+PrintFlagsFinal -version | egrep '(InitialHeapSize|MaxHeapSize)'
+   size_t InitialHeapSize           = 524288000                  {product} {ergonomic}
+   size_t MaxHeapSize               = 8380219392                 {product} {ergonomic}
+----
+
+They can be overridden on the command line. If we want to start with 100m initial heap and not grow beyond 1g we can specify the following options:
+
+[source, console?prompt=$, options="nowrap", highlight=1-2]
+----
+$ java -XX:+UseSerialGC -XX:+PrintFlagsFinal -XX:InitialHeapSize=100m -XX:MaxHeapSize=1g \
+       -version | egrep '(InitialHeapSize|MaxHeapSize)'
+   size_t InitialHeapSize           = 104857600                  {product} {command line}
+   size_t MaxHeapSize               = 1073741824                 {product} {command line}
+----
+
+The JVM also has the notion of a minimum heap size which can be set with the `-Xms` command line option. `-Xms` will actually set both, the minimum and the initial heap size to the same value. But is also has some peculiarities: if you set both `-Xms` and `-XX:InitialHeapSize` and `-Xms` comes first on the command line than `sXms` will set the minimum and `-XX:InitialHeapSize` the initial heap size. If `-Xms` comes second, it will set both, the minimum and the initial heap size to the same value and override the effect of the `-XX:InitialHeapSize` option. To overcome this situation and make it possible to reliably and independently set both, the minimum and the initial heap size, jdk13 has introduced the new `-XX:MinHeapSize` flag (see https://bugs.openjdk.java.net/browse/JDK-8223837[JDK-8223837: Add -XX:MinHeapSize flag to set the minimum heap size]).
+
+== Serial GC
+
+For SerialGC, `InitialHeapSize` and `MaxHeapSize` determine the overall size of the heap (setting `-Xms` to a lower value than `InitialHeapSize` has no effect for SerialGC because the heap will never shrink below `InitialHeapSize`). The SerialGC heap is subdivided in the New (aka. Young) and the Old (aka. "Tenured") generation. The New generation is further subdivided into the three Eden, From and To spaces. We can see these spaces for each GC cycle when we enable GC logging with `-Xlog:gc+heap`. For the remainder of this blog we will use the simple https://github.com/simonis/Memory/blob/master/examples/java/Uncommit.java[`Uncommit.java`] example program which first allocates a configurable amount of data and then calls `System.gc()` several times after the data has been freed. It also calls `System.gc()` right after invoking the `main()` function, to get a baseline for our application:
+
+[source, console?prompt=$, options="nowrap", highlight=1-2, subs="+macros"]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=+++<mark>100m</mark>+++ -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace::none \
+       Uncommit
+...
+Calling System.gc()
+GC(0) Heap before GC invocations=0 (full 0):
+GC(0)  def new generation   total +++<mark>30720K</mark>+++, used 2733K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+GC(0)   eden space +++<mark>27328K</mark>+++,  10% used [0x00000000c0000000, 0x00000000c02ab448, 0x00000000c1ab0000)
+GC(0)   from space +++<mark>3392K</mark>+++,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+GC(0)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+GC(0)  tenured generation   total +++<mark>68288K</mark>+++, used 0K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+GC(0)    the space 68288K,   0% used [0x00000000d5550000, 0x00000000d5550000, 0x00000000d5550200, 0x00000000d9800000)
+...
+----
+
+Before this very first GC Eden and From sum up to New (i.e. +++<mark>27328k</mark>+++ + +++<mark>3392k</mark>+++ == +++<mark>30720k</mark>+++) and New plus Tenured plus To sum up to InitialHeapSize (i.e. +++<mark>30720k</mark>+++ + +++<mark>68288k</mark>+++ + 3392k == 102400k == +++<mark>100m</mark>+++). Notice how the size of New is given as 30720 which only includes Eden and From because out of From and To only one will be active at any given time. In reality, New occupies 34112k (i.e. Eden + From + To) and this can be easily computed from (0x00000000c2150000 - 0x00000000c0000000) / 1024. 0x00000000c0000000 is the starting address of New and 0x00000000c2150000 is the end address of its currently active part (i.e. the initially committed part). The maximum reserved size of New is 349504k and it goes from 0x00000000c0000000 to 0x00000000d5550000.
+
+For Tenured, the currently active (i.e. committed) part has a size of 68288K (from 0x00000000d5550000 to 0x00000000d9800000) while its reserved size (i.e. 699072k) starts at 0x00000000d5550000 and ends at 0x0000000100000000. The reserved sizes for New and Tenured sum up to MaxHeapSize (i.e. 349504k + 699072k == 1048576k == 1g).
+
+New occupies ~33% (i.e. 349504k / 1048576k == 0.33) and Tenured ~66% (i.e. 699072k / 1048576k == 0.66) of the total reserved heap which corresponds to an Old/New ratio of 2 as specified by the default value for `-XX:NewRatio`. This is also the ratio of the initially committed parts of New and Tenured (i.e. 34112k / 102400k == 0.33 for New and 68288k / 102400k == 0.66 for Tenured).
+
+[source, console?prompt=$, options="nowrap"]
+----
+...
+[0,624s][debug][gc,ergo,heap ] GC(0) New generation size 34112K->34176K [eden=27392K,survivor=3392K]
+[0,624s][trace][gc,ergo,heap ] GC(0)   [allowed 5K extra for 1 threads]
+[0,624s][info ][gc,heap      ] GC(0) DefNew: 2733K(30720K)->0K(30784K) Eden: 2733K(27328K)->0K(27392K) From: 0K(3392K)->0K(3392K)
+[0,624s][info ][gc,heap      ] GC(0) Tenured: 0K(68288K)->689K(68288K)
+[0,624s][debug][gc,heap      ] GC(0) Heap after GC invocations=1 (full 1):
+[0,624s][debug][gc,heap      ] GC(0)  def new generation   total 30784K, used 0K [0x00000000c0000000, 0x00000000c2160000, 0x00000000d5550000)
+[0,624s][debug][gc,heap      ] GC(0)   eden space 27392K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ac0000)
+[0,624s][debug][gc,heap      ] GC(0)   from space 3392K,   0% used [0x00000000c1ac0000, 0x00000000c1ac0000, 0x00000000c1e10000)
+[0,624s][debug][gc,heap      ] GC(0)   to   space 3392K,   0% used [0x00000000c1e10000, 0x00000000c1e10000, 0x00000000c2160000)
+[0,624s][debug][gc,heap      ] GC(0)  tenured generation   total 68288K, used 689K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+[0,624s][debug][gc,heap      ] GC(0)    the space 68288K,   1% used [0x00000000d5550000, 0x00000000d55fc4c0, 0x00000000d55fc600, 0x00000000d9800000)
+...
+----
+
+As you can see, after the first full GC, the size of New will be adjusted to accommodate the number of Java threads (1 in our case). Notice that as of the writing of this blog, a stock OpenJDK will always prints `"0k extra for 0 threads"`. This logging error will be fixed by https://bugs.openjdk.java.net/browse/JDK-8270100[JDK-8270100].
+
+To simplify further analysis we can disable this resizing by setting `-XX:NewSizeThreadIncrease` to 0. We also set `-XX:NativeMemoryTracking=summary` so we can use NMT to verify the GC log output:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=100m -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace -XX:NewSizeThreadIncrease=0 -XX:NativeMemoryTracking=summary Uncommit
+...
+[0,106s][info ][gc,heap      ] GC(0) DefNew: 2733K(30720K)->0K(30720K) Eden: 2733K(27328K)->0K(27328K) From: 0K(3392K)->0K(3392K)
+[0,106s][info ][gc,heap      ] GC(0) Tenured: 0K(68288K)->733K(68288K)
+[0,106s][debug][gc,heap      ] GC(0) Heap after GC invocations=1 (full 1):
+[0,106s][debug][gc,heap      ] GC(0)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[0,106s][debug][gc,heap      ] GC(0)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[0,106s][debug][gc,heap      ] GC(0)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[0,106s][debug][gc,heap      ] GC(0)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[0,106s][debug][gc,heap      ] GC(0)  tenured generation   total 68288K, used 733K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+[0,106s][debug][gc,heap      ] GC(0)    the space 68288K,   1% used [0x00000000d5550000, 0x00000000d56074d0, 0x00000000d5607600, 0x00000000d9800000)
+...
+VmRSS:	   40772 kB
+
+Press <Enter>
+----
+
+The NMT information for our application confirms the reserved (i.e.1048576k == 1g) and committed (i.e. 102400k == 100m) heap sizes we've calculated from the GC log before:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ jcmd Uncommit VM.native_memory
+...
+-                 Java Heap (reserved=1048576KB, committed=102400KB)
+                            (mmap: reserved=1048576KB, committed=102400KB)
+...
+----
+
+But unfortunately, on Linux "committed" doesn't mean that a memory segment is backed up by real, physical memory until each of its pages was touched (i.e. written to) for the first time. This means that the corresponding pages won't show up in the so called "resident set" (i.e. RSS) of the process until they get touched. We can verify this with `pmap` command:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ pmap -x 17126
+...
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112    1408    1408 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000   68288     736     736 rw---   [ anon ]
+00000000d9800000  630784       0       0 -----   [ anon ]
+0000000800000000      12      12      12 rwx-- classes.jsa
+0000000800003000    4348    4052    3140 rw--- classes.jsa
+0000000800442000    7956    7632       0 r---- classes.jsa
+...
+---------------- ------- ------- -------
+total kB         3470076   41820   14000
+----
+
+"rw" (i.e. read/write) mode means that the corresponding mapping has been committed while an empty mode indicates a virtual memory mapping which has only been reserved but not yet committed. "RSS" (i.e. resident set size) denotes the part of the corresponding mapping which is actually present in physical memory. If a virtual memory mapping is backed up by a file, the "Mapping" section contains the file name (e.g. `classes.jsa` for the CDS, i.e. class data sharing archive). For the Java heap `[ anon ]` indicates that it is an anonymous mapping. Finally, the "Dirty" column prints the amount of memory which has been changed with respect to the primary source of the mapping. For anonymous mappings like the Java heap, RSS is equal to Dirty but for file mappings like the CDS archive we can see that for writable sections some parts might still correspond to the original data in the file and Dirty \<= RSS \<= Kbytes. For read-only mappings, the application can't change the data so Dirty will always be zero (see https://simonis.github.io/JavaZone2018/CDS/cds.xhtml#/10/1[slides]/https://vimeo.com/289644820#t=2789s[video] for more details about the CDS sections and layout).
+
+For the Java heap we can see that a slice of 34112k (which is exactly the size of "Eden + From + To") and another one of 68288k (which corresponds to the size of Tenured) are committed while the remaining part of the heap (315392k + 630784k == 946176k == 1048576k - 102400k == 1048576 - (34112k + 68288k)) is only reserved. The interesting and maybe surprising part of this itemization is the fact that out of the 102400k committed Java heap (as displayed by the GC log and NMT) only 2144k (i.e. 1408k + 736k) are initially mapped to physical memory and account for the process' RSS.
+
+It is also interesting to see that for the old generation the RSS portion reported by `pmap` corresponds exactly to the used part of that region as reported by the GC log if we align it to 4k pages (i.e. 736k == (733k + 4k) & 0xfff8). For the new generation the 1408k RSS as reported by `pmap` is much smaller than the 2733k reported by the GC log as "used". This difference is caused by a feature called "thread local allocation buffer" (TLAB) which is used to speed up allocations. It works by assigning each thread an own, private chunk of Eden such that it doesn't need to synchronize with other threads for each allocation. For the GC log, these parts of Eden count as "used", although the threads owning them might not have filled them up (i.e. touched them) completely. If we run our sample application with `-XX:-UseTLAB` we can see that the reported "used" size of 1393f for the new generation is much closer to the 1408k RSS as reported by `pmap`:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=100m -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace -XX:NewSizeThreadIncrease=0 -XX:NativeMemoryTracking=summary -XX:-UseTLAB Uncommit
+...
+[0,141s][debug][gc,heap      ] GC(0) Heap before GC invocations=0 (full 0):
+[0,141s][debug][gc,heap      ] GC(0)  def new generation   total 30720K, used 1393K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[0,141s][debug][gc,heap      ] GC(0)   eden space 27328K,   5% used [0x00000000c0000000, 0x00000000c015c6a8, 0x00000000c1ab0000)
+[0,141s][debug][gc,heap      ] GC(0)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[0,141s][debug][gc,heap      ] GC(0)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+----
+
+The size of the TLAB is adaptive but can also be specified with the `-XX:TLABSize` option. It defaults to zero which means that the initial size will be determined ergonomically. Unfortunately, this determined, initial size can only be logged in a debug build of the JVM with the command line option `-Xlog:tlab*=trace`:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -Xlog:tlab*=trace -version
+[0.066s][trace][gc,tlab] TLAB min: 328 initial: 62914 max: 262144
+...
+----
+
+To sum it up, we can see that after the first `System.gc()`, our Java process only uses ~40m of RSS (i.e. 41820k according to `pmap` and 40772k according to ``Uncommit``s own accounting gathered from `/proc/self/status` and printed to stdout as `VmRSS: 40772 kB`). The Java heap only contributes 2144k (i.e. 1408k + 736k) to this amount.
+
+After pressing `<Enter>`, the application will allocate 512m in chunks of `int[256]` arrays (the amount of allocated megabytes can be configured with the first command line argument). The allocations will trigger several implicit GCs and increase the committed heap to accommodate for the new data. After all the allocations have been satisfied, we get the following output:
+
+[source, console?prompt=$, options="nowrap"]
+----
+...
+[3,444s][debug][gc,heap      ] GC(24) Heap after GC invocations=21 (full 5):
+[3,444s][debug][gc,heap      ] GC(24)  def new generation   total 30720K, used 3392K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[3,444s][debug][gc,heap      ] GC(24)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[3,444s][debug][gc,heap      ] GC(24)   from space 3392K, 100% used [0x00000000c1ab0000, 0x00000000c1e00000, 0x00000000c1e00000)
+[3,444s][debug][gc,heap      ] GC(24)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[3,444s][debug][gc,heap      ] GC(24)  tenured generation   total 699072K, used 530586K [0x00000000d5550000, 0x0000000100000000, 0x0000000100000000)
+[3,444s][debug][gc,heap      ] GC(24)    the space 699072K,  75% used [0x00000000d5550000, 0x00000000f5b76990, 0x00000000f5b76a00, 0x0000000100000000)
+[3,444s][debug][gc,heap      ] GC(24)  Metaspace       used 1066K, committed 1216K, reserved 1056768K
+[3,444s][debug][gc,heap      ] GC(24)   class space    used 101K, committed 192K, reserved 1048576K
+Successfully allocated 512MB memory
+VmRSS:	  605720 kB
+...
+----
+
+The new generation is now using (i.e. has committed) 34112k (i.e. Eden + From + To == 27328K + 3392K + 3392K == 30720K + 3392K == 34112k) and the old generation is using 699072k which corresponds to its maximum size. These are the same numbers as reported by NMT (i.e. 699072k + 34112k == 733184k):
+
+[source, console?prompt=$, options="nowrap"]
+----
+-                 Java Heap (reserved=1048576KB, committed=733184KB)
+                            (mmap: reserved=1048576KB, committed=733184KB)
+----
+
+If we are looking at the `pmap` output, we'll see:
+
+[source, console?prompt=$, options="nowrap"]
+----
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112   34112   34112 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000  699072  530588  530588 rw---   [ anon ]
+0000000800000000      12      12      12 rwx-- classes.jsa
+...
+---------------- ------- ------- -------
+total kB         3536640  607048  579104
+----
+
+The Tenured generation is now fully committed and 530588k out of the total 699072k are mapped to physical memory. From the young generation, 34112k out of 315392k are committed and mapped to physical memory. These numbers correspond to the committed heap size reported by NMT (i.e. 699072k + 34112k == 733184k). The Java heap now contributes 564700k (i.e. 530588k + 34112k == 564700k) to the total of 607048k RSS (or 605720 as reported by the application) consumed by the Java process.
+
+Pressing `<Enter>` one more time, will unlink the allocated memory and make it available for reclamation by the GC:
+
+[source, console?prompt=$, options="nowrap"]
+----
+...
+Successfully unlinked 512MB memory
+VmRSS:	  605960 kB
+
+Press <Enter>
+...
+----
+
+Every subsequent push of `<Enter>` will trigger a new `System.gc()`. The total number of system GCs is configurable as an optional, second command line parameter and defaults to 5. We will now take a look at the `CardGeneration::compute_new_size` section in the log which we've ignored until now:
+
+[source, console?prompt=$, options="nowrap"]
+----
+[5,218s][debug][gc,heap      ] GC(25) Heap before GC invocations=21 (full 5):
+[5,218s][debug][gc,heap      ] GC(25)  def new generation   total 30720K, used 14935K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[5,218s][debug][gc,heap      ] GC(25)   eden space 27328K,  42% used [0x00000000c0000000, 0x00000000c0b45ec8, 0x00000000c1ab0000)
+[5,218s][debug][gc,heap      ] GC(25)   from space 3392K, 100% used [0x00000000c1ab0000, 0x00000000c1e00000, 0x00000000c1e00000)
+[5,218s][debug][gc,heap      ] GC(25)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[5,218s][debug][gc,heap      ] GC(25)  tenured generation   total 699072K, used 528963K [0x00000000d5550000, 0x0000000100000000, 0x0000000100000000)
+[5,218s][debug][gc,heap      ] GC(25)    the space 699072K,  75% used [0x00000000d5550000, 0x00000000f59e0df8, 0x00000000f59e0e00, 0x0000000100000000)
+
+[5,272s][trace][gc,heap      ] GC(25) CardGeneration::compute_new_size:
+[5,272s][trace][gc,heap      ] GC(25)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[5,272s][trace][gc,heap      ] GC(25)      free_after_gc   : 671718,8K   used_after_gc   : 27353,2K   capacity_after_gc   : 699072,0K
+[5,272s][trace][gc,heap      ] GC(25)      free_percentage:   0,96
+[5,272s][trace][gc,heap      ] GC(25)     maximum_free_percentage:   0,70  minimum_used_percentage:   0,30
+[5,272s][trace][gc,heap      ] GC(25)     _capacity_at_prologue: 699072,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 91177,4K
+[5,272s][trace][gc,heap      ] GC(25)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 91177,4K
+[5,272s][trace][gc,heap      ] GC(25)     shrink_bytes: 0,0K  current_shrink_factor: 0  new shrink factor: 10  _min_heap_delta_bytes: 192,0K
+
+[5,272s][info ][gc,heap      ] GC(25) DefNew: 14935K(30720K)->0K(30720K) Eden: 11543K(27328K)->0K(27328K) From: 3392K(3392K)->0K(3392K)
+[5,272s][info ][gc,heap      ] GC(25) Tenured: 528963K(699072K)->27353K(699072K)
+
+[5,272s][debug][gc,heap      ] GC(25) Heap after GC invocations=22 (full 6):
+[5,272s][debug][gc,heap      ] GC(25)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[5,272s][debug][gc,heap      ] GC(25)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[5,272s][debug][gc,heap      ] GC(25)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[5,272s][debug][gc,heap      ] GC(25)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[5,272s][debug][gc,heap      ] GC(25)  tenured generation   total 699072K, used 27353K [0x00000000d5550000, 0x0000000100000000, 0x0000000100000000)
+[5,272s][debug][gc,heap      ] GC(25)    the space 699072K,   3% used [0x00000000d5550000, 0x00000000d70064e0, 0x00000000d7006600, 0x0000000100000000)
+Performed 1. System.gc()
+
+VmRSS:	  603992 kB
+Press <Enter>
+----
+
+This function gets called after each full GC to adjust the heap size between `InitialHeapSize` and `MaxHeapSize` if necessary. In addition to the initial and the maximum heap size it is controlled by the two parameters `MinHeapFreeRatio` which denotes the minimum percentage of heap free after GC to avoid expansion and `MaxHeapFreeRatio` which gives the maximum percentage of heap free after GC to avoid shrinking. For SerialGC the latter two parameters apply to the old generation only while for other GCs like G1 and ParallelGC they apply to the whole heap.
+
+`MinHeapFreeRatio` (displayed as `minimum_free_percentage` in the GC log) defaults to 40% and `MaxHeapFreeRatio` (shown as `maximum_free_percentage` in the log) defaults to 70%. After this full GC cycle the used part of Tenured has dropped from 528963k to 27353.2k which leads to a free ratio of 96% (i.e. (699072k - 27353.2k) / 699072k == 0.96%). In order to compute the new size of Tenured after this GC we have to take into account that our `maximum_free_percentage` is 70%. So we set the currently `used_after_gc` amount (i.e. 27353.2k) to 30% and compute the desired size of Tenured to 91177.4k (i.e. 27353.2k / 0.30 == 91177.4). Notice that the minimal shrunken size of Tenured (i.e. `minimum_desired_capacity`) has a lower bound of 68288k which is the initially computed size of Tenured for a heap size of 100m.
+
+This means that we could shrink Tenured after this GC cycle by 699072k - 91177k == 607895k. However, in order to avoid repetitive shrink/expand cycles, the JVM additionally damps the shrink amount (i.e. `shrink_bytes`) by a series of hard-coded shrink factors which start at 0% and increase from 10% to 40% and finally 100%. Because the initial shrink factor is 0% `shrink_bytes` evaluates to 0k which that means no heap reduction will happen after this GC. In the end, although this full GC has collected ~500m of garbage, the RSS footprint of the Java process remains almost unchanged at ~600m.
+
+If we press `<Enter>` one more time, the second `System.gc()` will be triggered after we've unlinked the 512m of memory allocated by the application:
+
+[source, console?prompt=$, options="nowrap"]
+----
+[7,878s][debug][gc,heap      ] GC(26) Heap before GC invocations=22 (full 6):
+[7,878s][debug][gc,heap      ] GC(26)  def new generation   total 30720K, used 534K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[7,878s][debug][gc,heap      ] GC(26)   eden space 27328K,   1% used [0x00000000c0000000, 0x00000000c0085bb8, 0x00000000c1ab0000)
+[7,878s][debug][gc,heap      ] GC(26)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[7,878s][debug][gc,heap      ] GC(26)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[7,878s][debug][gc,heap      ] GC(26)  tenured generation   total 699072K, used 27353K [0x00000000d5550000, 0x0000000100000000, 0x0000000100000000)
+[7,878s][debug][gc,heap      ] GC(26)    the space 699072K,   3% used [0x00000000d5550000, 0x00000000d70064e0, 0x00000000d7006600, 0x0000000100000000)
+
+[7,884s][trace][gc,heap      ] GC(26) CardGeneration::compute_new_size:
+[7,884s][trace][gc,heap      ] GC(26)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[7,884s][trace][gc,heap      ] GC(26)      free_after_gc   : 671718,4K   used_after_gc   : 27353,6K   capacity_after_gc   : 699072,0K
+[7,884s][trace][gc,heap      ] GC(26)      free_percentage:   0,96
+[7,884s][trace][gc,heap      ] GC(26)     maximum_free_percentage:   0,70  minimum_used_percentage:   0,30
+[7,884s][trace][gc,heap      ] GC(26)     _capacity_at_prologue: 699072,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 91178,7K
+[7,884s][trace][gc,heap      ] GC(26)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 91178,7K
+[7,884s][trace][gc,heap      ] GC(26)     shrink_bytes: 60789,3K  current_shrink_factor: 10  new shrink factor: 40  _min_heap_delta_bytes: 192,0K
+[7,885s][trace][gc,heap      ] GC(26) Shrinking tenured generation from 699072K to 638284K
+
+[7,885s][info ][gc,heap      ] GC(26) DefNew: 534K(30720K)->0K(30720K) Eden: 534K(27328K)->0K(27328K) From: 0K(3392K)->0K(3392K)
+[7,885s][info ][gc,heap      ] GC(26) Tenured: 27353K(699072K)->27353K(638284K)
+
+[7,885s][debug][gc,heap      ] GC(26) Heap after GC invocations=23 (full 7):
+[7,885s][debug][gc,heap      ] GC(26)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[7,885s][debug][gc,heap      ] GC(26)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[7,885s][debug][gc,heap      ] GC(26)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[7,885s][debug][gc,heap      ] GC(26)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[7,885s][debug][gc,heap      ] GC(26)  tenured generation   total 638284K, used 27353K [0x00000000d5550000, 0x00000000fc4a3000, 0x0000000100000000)
+[7,885s][debug][gc,heap      ] GC(26)    the space 638284K,   4% used [0x00000000d5550000, 0x00000000d7006678, 0x00000000d7006800, 0x00000000fc4a3000)
+Performed 2. System.gc()
+
+VmRSS:	  604028 kB
+Press <Enter>
+----
+
+This time the `maximum_desired_capacity` is 91178.7k which, together with the new shrink factor of 10%, allows us to shrink (i.e. uncommit) the Tenured heap by 60789.3k (i.e. (699072k - 91178.7k) * 0.10 == 607893.3k * 0.10 == 60789.3k). Notice that although we've uncommitted ~60m of old heap, the RSS footprint of the process still remains unchanged at ~600m. This is because the 60m memory which we've just uncommitted haven't been touched before so they did not increase the memory footprint of the Java process. We can verify this by running `pmap`. After the previous, 5th full GC, the memory layout of the heap looked as follows:
+
+[source, console?prompt=$, options="nowrap"]
+----
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112   34112   34112 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000  699072  528976  528976 rw---   [ anon ]
+----
+
+You can see that the whole 699072k Tenured generation is committed, but only 528976k are dirty (i.e. have been touched). After the latest, 7th `System.gc()`, the `pmap` output looks as follows:
+
+[source, console?prompt=$, options="nowrap"]
+----
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112   34112   34112 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000  638284  528976  528976 rw---   [ anon ]
+00000000d90ad000   60788       0       0 -----   [ anon ]
+----
+
+You can see that indeed 60788k (i.e. 60789.3k aligned down to 4k pages) have now been uncommitted, but the number of dirty pages remains the same. Uncommitting has no impact on the RSS footprint in this case. Let's see what happens if we trigger yet another `System.gc()`:
+
+[source, console?prompt=$, options="nowrap"]
+----
+[192,657s][debug][gc,heap      ] GC(27) Heap before GC invocations=23 (full 7):
+[192,657s][debug][gc,heap      ] GC(27)  def new generation   total 30720K, used 534K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[192,657s][debug][gc,heap      ] GC(27)   eden space 27328K,   1% used [0x00000000c0000000, 0x00000000c0085bc0, 0x00000000c1ab0000)
+[192,657s][debug][gc,heap      ] GC(27)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[192,657s][debug][gc,heap      ] GC(27)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[192,657s][debug][gc,heap      ] GC(27)  tenured generation   total 638284K, used 27354K [0x00000000d5550000, 0x00000000fc4a3000, 0x0000000100000000)
+[192,657s][debug][gc,heap      ] GC(27)    the space 638284K,   4% used [0x00000000d5550000, 0x00000000d70068a8, 0x00000000d7006a00, 0x00000000fc4a3000)
+
+[192,664s][trace][gc,heap      ] GC(27) CardGeneration::compute_new_size:
+[192,664s][trace][gc,heap      ] GC(27)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[192,664s][trace][gc,heap      ] GC(27)      free_after_gc   : 637481,5K   used_after_gc   :  802,5K   capacity_after_gc   : 638284,0K
+[192,664s][trace][gc,heap      ] GC(27)      free_percentage:   1,00
+[192,664s][trace][gc,heap      ] GC(27)     maximum_free_percentage:   0,70  minimum_used_percentage:   0,30
+[192,665s][trace][gc,heap      ] GC(27)     _capacity_at_prologue: 638284,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 68288,0K
+[192,665s][trace][gc,heap      ] GC(27)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 68288,0K
+[192,665s][trace][gc,heap      ] GC(27)     shrink_bytes: 227998,4K  current_shrink_factor: 40  new shrink factor: 100  _min_heap_delta_bytes: 192,0K
+
+[192,680s][trace][gc,heap      ] GC(27) Shrinking tenured generation from 638284K to 410288K
+[192,680s][info ][gc,heap      ] GC(27) DefNew: 534K(30720K)->0K(30720K) Eden: 534K(27328K)->0K(27328K) From: 0K(3392K)->0K(3392K)
+
+[192,680s][info ][gc,heap      ] GC(27) Tenured: 27354K(638284K)->802K(410288K)
+[192,680s][debug][gc,heap      ] GC(27) Heap after GC invocations=24 (full 8):
+[192,680s][debug][gc,heap      ] GC(27)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[192,680s][debug][gc,heap      ] GC(27)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[192,680s][debug][gc,heap      ] GC(27)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[192,680s][debug][gc,heap      ] GC(27)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[192,680s][debug][gc,heap      ] GC(27)  tenured generation   total 410288K, used 802K [0x00000000d5550000, 0x00000000ee5fc000, 0x0000000100000000)
+[192,680s][debug][gc,heap      ] GC(27)    the space 410288K,   0% used [0x00000000d5550000, 0x00000000d56189d8, 0x00000000d5618a00, 0x00000000ee5fc000)
+Performed 3. System.gc()
+
+VmRSS:	  484636 kB
+Press <Enter>
+----
+
+This time, occupancy of Tenured after the GC has dropped from 27354k to 802k. This means that we could potentially further shrink Tenured down to 2675k (i.e. 802.5 / 0.3 == 2675k) but because we have to respect the initial Tenured size as lower bound `maximum_desired_capacity` becomes 68288k which is equal to `minimum_desired_capacity`. Together with the new shrink factor of 40% this allows us to shrink the old heap by another 227998.4k (i.e. (638284k - 68288k) * 0.4 = 227998.4k). We can see that the RSS footprint of the process has now finally dropped from ~600m down to ~480m. This is still less than the ~220m we've shrunken the heap, but we now understand that it's not the amount of uncommitted memory which is crucial, but the amount of _dirty_ memory we've uncommitted. A quick look at the `pmap` output confirms the result:
+
+[source, console?prompt=$, options="nowrap"]
+----
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112   34112   34112 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000  410288  410288  410288 rw---   [ anon ]
+00000000ee5fc000  288784       0       0 -----   [ anon ]
+----
+
+We've uncommitted an additional amount of 227996k (i.e. 288784k - 60788k == 227996k) which correspond exactly to `shrink_bytes` aligned down to 4k pages. And this time, out of the 227996k uncommitted memory, 118688k (i.e. 528976k - 410288k == 118688k) have been dirty which correlates quite well with the observed decrease RSS usage of the process from 604028k down to 484636k (i.e. 604028k - 484636k == 119392k).
+
+After the 4th `System.gc()` we're finally down the initial Tenured size:
+
+[source, console?prompt=$, options="nowrap"]
+----
+[3683,752s][debug][gc,heap      ] GC(28) Heap before GC invocations=24 (full 8):
+[3683,752s][debug][gc,heap      ] GC(28)  def new generation   total 30720K, used 808K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[3683,752s][debug][gc,heap      ] GC(28)   eden space 27328K,   2% used [0x00000000c0000000, 0x00000000c00ca0f8, 0x00000000c1ab0000)
+[3683,752s][debug][gc,heap      ] GC(28)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[3683,752s][debug][gc,heap      ] GC(28)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[3683,752s][debug][gc,heap      ] GC(28)  tenured generation   total 410288K, used 802K [0x00000000d5550000, 0x00000000ee5fc000, 0x0000000100000000)
+[3683,752s][debug][gc,heap      ] GC(28)    the space 410288K,   0% used [0x00000000d5550000, 0x00000000d56189d8, 0x00000000d5618a00, 0x00000000ee5fc000)
+
+[3683,759s][trace][gc,heap      ] GC(28) CardGeneration::compute_new_size:
+[3683,759s][trace][gc,heap      ] GC(28)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[3683,759s][trace][gc,heap      ] GC(28)      free_after_gc   : 409485,2K   used_after_gc   :  802,8K   capacity_after_gc   : 410288,0K
+[3683,759s][trace][gc,heap      ] GC(28)      free_percentage:   1,00
+[3683,759s][trace][gc,heap      ] GC(28)     maximum_free_percentage:   0,70  minimum_used_percentage:   0,30
+[3683,759s][trace][gc,heap      ] GC(28)     _capacity_at_prologue: 410288,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 68288,0K
+[3683,759s][trace][gc,heap      ] GC(28)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 68288,0K
+[3683,759s][trace][gc,heap      ] GC(28)     shrink_bytes: 342000,0K  current_shrink_factor: 100  new shrink factor: 100  _min_heap_delta_bytes: 192,0K
+[3683,796s][trace][gc,heap      ] GC(28) Shrinking tenured generation from 410288K to 68288K
+
+[3683,796s][info ][gc,heap      ] GC(28) DefNew: 808K(30720K)->0K(30720K) Eden: 808K(27328K)->0K(27328K) From: 0K(3392K)->0K(3392K)
+[3683,796s][info ][gc,heap      ] GC(28) Tenured: 802K(410288K)->802K(68288K)
+
+[3683,796s][debug][gc,heap      ] GC(28) Heap after GC invocations=25 (full 9):
+[3683,796s][debug][gc,heap      ] GC(28)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[3683,796s][debug][gc,heap      ] GC(28)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[3683,796s][debug][gc,heap      ] GC(28)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[3683,796s][debug][gc,heap      ] GC(28)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[3683,796s][debug][gc,heap      ] GC(28)  tenured generation   total 68288K, used 802K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+[3683,796s][debug][gc,heap      ] GC(28)    the space 68288K,   1% used [0x00000000d5550000, 0x00000000d5618b10, 0x00000000d5618c00, 0x00000000d9800000)
+Performed 4. System.gc()
+
+VmRSS:	  141304 kB
+Press <Enter>
+----
+
+The RSS footprint has significantly dropped down to ~140m but is still significantly higher compared to the ~40m before we have first allocated the 512m of data in the application. The output of `pmap` shows that although the live set of Java objects in New and Tenured only need ~800k of memory, both New and Tenured are now fully touched and dirty up to the amount of `InitialHeapSize` (i.e. 68288k + 34112k == 102400k == 100m) and contribute with 100m to the RSS footprint of the process:
+
+[source, console?prompt=$, options="nowrap"]
+----
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112   34112   34112 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000   68288   68288   68288 rw---   [ anon ]
+00000000d9800000  630784       0       0 -----   [ anon ]
+----
+
+These 100m won't go away, no matter how often we will call `System.gc()` again and how low the heap consumption will drop.
+
+== Fine tuning
+
+=== `-XX:+AlwaysPreTouch`
+
+The fact that Linux by default lazily maps committed, virtual memory to real, physical memory only when the corresponding memory pages get actually touched is a nice optimization which helps to save memory and CPU cycles at startup. But it also comes at a cost. Depending on the https://www.kernel.org/doc/Documentation/vm/overcommit-accounting[memory overcommit settings] an application might run into out of memory situations long time after it has reserved and committed the amount of memory it requires. Also, mapping virtual to physical pages on demand can cause unpredictable delays for certain memory accesses. To mitigate these drawbacks, the OpenJDK provides the `-XX:+AlwaysPreTouch` option (off by default) which will immediately touch (i.e. map to phyiscal memory) all the committed heap and code cache parts right at JVM startup. Enabling `-XX:+AlwaysPreTouch` slows done the startup a little bit but leads to more consistent and constant runtime behavior.
+
+Running our example `Uncommit` application with `-XX:+AlwaysPreTouch` will result in the following GC log output for the first `System.gc()`:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=100m -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace -XX:NewSizeThreadIncrease=0 -XX:+AlwaysPreTouch Uncommit
+...
+[0,184s][debug][gc,heap      ] GC(0) Heap after GC invocations=1 (full 1):
+[0,184s][debug][gc,heap      ] GC(0)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[0,184s][debug][gc,heap      ] GC(0)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[0,184s][debug][gc,heap      ] GC(0)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[0,184s][debug][gc,heap      ] GC(0)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[0,184s][debug][gc,heap      ] GC(0)  tenured generation   total 68288K, used 733K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+[0,184s][debug][gc,heap      ] GC(0)    the space 68288K,   1% used [0x00000000d5550000, 0x00000000d5607500, 0x00000000d5607600, 0x00000000d9800000)
+...
+VmRSS:	  147532 kB
+----
+
+Compared to before when running with the default `-XX:-AlwaysPreTouch` setting, the size and occupancy of New and Tenured are exactly the same, but the RSS footprint of the whole process has increased from ~40m to ~147m. Double checking with `pmap` confirms, that the committed parts of New and Tenured are also  the same with the only difference that they are now fully dirty (i.e. mapped to physical pages):
+
+[source, console?prompt=$, options="nowrap"]
+----
+Address           Kbytes     RSS   Dirty Mode  Mapping
+00000000c0000000   34112   34112   34112 rw---   [ anon ]
+00000000c2150000  315392       0       0 -----   [ anon ]
+00000000d5550000   68288   68288   68288 rw---   [ anon ]
+00000000d9800000  630784       0       0 -----   [ anon ]
+----
+
+A careful reader might have observed that the fully touched heap only accounts for ~100m additional memory. The remaining ~7m of additional RSS memory originate from the code cache which has now also been completely touched at startup. With `-XX:+AlwaysPreTouch` the maximum RSS footprint of our example application will increase up to ~780m (compared to ~600m before) but than decrease back to the initial ~147m after calling `System.gc()` four times.
+
+=== `-XX:-ShrinkHeapInSteps`
+
+As we have seen in our example, it takes four full GCs with SerialGC to return all non-required heap memory back to the OS. The predefined shrink factors can help to avoid oscillating heap size changes but in some situations it might be beneficial if the the application itself could fully control when heap memory should be returned to the OS. Since jdk 9 this is possible with the new `-XX:-ShrinkHeapInSteps` option which is on by default (see https://bugs.openjdk.java.net/browse/JDK-8146436[JDK-8146436: Add -XX:-ShrinkHeapInSteps option]). If `ShrinkHeapInSteps` is disabled, a call to `System.gc()` will always shrink the heap down right to the `maximum_desired_capacity` (i.e. the shrink factor will always be 100%). So with this option, we will get the following picture after the first `System.gc()` after the allocation:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=100m -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace -XX:NewSizeThreadIncrease=0 -XX:-ShrinkHeapInSteps Uncommit
+...
+[3,457s][trace][gc,heap      ] GC(25) CardGeneration::compute_new_size:
+[3,457s][trace][gc,heap      ] GC(25)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[3,457s][trace][gc,heap      ] GC(25)      free_after_gc   : 671718,8K   used_after_gc   : 27353,2K   capacity_after_gc   : 699072,0K
+[3,457s][trace][gc,heap      ] GC(25)      free_percentage:   0,96
+[3,457s][trace][gc,heap      ] GC(25)     maximum_free_percentage:   0,70  minimum_used_percentage:   0,30
+[3,457s][trace][gc,heap      ] GC(25)     _capacity_at_prologue: 699072,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 91177,4K
+[3,457s][trace][gc,heap      ] GC(25)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 91177,4K
+[3,457s][trace][gc,heap      ] GC(25)     shrink_bytes: 607894,6K  current_shrink_factor: 0  new shrink factor: 0  _min_heap_delta_bytes: 192,0K
+
+[3,484s][trace][gc,heap      ] GC(25) Shrinking tenured generation from 699072K to 91180K
+[3,484s][info ][gc,heap      ] GC(25) DefNew: 14935K(30720K)->0K(30720K) Eden: 11543K(27328K)->0K(27328K) From: 3392K(3392K)->0K(3392K)
+
+[3,484s][info ][gc,heap      ] GC(25) Tenured: 528963K(699072K)->27353K(91180K)
+[3,484s][debug][gc,heap      ] GC(25) Heap after GC invocations=22 (full 6):
+[3,485s][debug][gc,heap      ] GC(25)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[3,485s][debug][gc,heap      ] GC(25)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[3,485s][debug][gc,heap      ] GC(25)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[3,485s][debug][gc,heap      ] GC(25)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[3,485s][debug][gc,heap      ] GC(25)  tenured generation   total 91180K, used 27353K [0x00000000d5550000, 0x00000000dae5b000, 0x0000000100000000)
+[3,485s][debug][gc,heap      ] GC(25)    the space 91180K,  29% used [0x00000000d5550000, 0x00000000d70064e0, 0x00000000d7006600, 0x00000000dae5b000)
+Performed 1. System.gc()
+
+VmRSS:	  165052 kB
+Press <Enter>
+----
+
+We still need a second full GC to shrink the heap to its initial size, because after the first one the computed `maximum_desired_capacity` is still bigger than the `minimum_desired_capacity`:
+
+[source, console?prompt=$, options="nowrap"]
+----
+...
+[891,270s][trace][gc,heap      ] GC(26) CardGeneration::compute_new_size:
+[891,270s][trace][gc,heap      ] GC(26)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[891,271s][trace][gc,heap      ] GC(26)      free_after_gc   : 90378,1K   used_after_gc   :  801,9K   capacity_after_gc   : 91180,0K
+[891,271s][trace][gc,heap      ] GC(26)      free_percentage:   0,99
+[891,271s][trace][gc,heap      ] GC(26)     maximum_free_percentage:   0,70  minimum_used_percentage:   0,30
+[891,271s][trace][gc,heap      ] GC(26)     _capacity_at_prologue: 91180,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 68288,0K
+[891,271s][trace][gc,heap      ] GC(26)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 68288,0K
+[891,271s][trace][gc,heap      ] GC(26)     shrink_bytes: 22892,0K  current_shrink_factor: 0  new shrink factor: 0  _min_heap_delta_bytes: 192,0K
+[891,274s][trace][gc,heap      ] GC(26) Shrinking tenured generation from 91180K to 68288K
+
+[891,274s][info ][gc,heap      ] GC(26) DefNew: 534K(30720K)->0K(30720K) Eden: 534K(27328K)->0K(27328K) From: 0K(3392K)->0K(3392K)
+[891,274s][info ][gc,heap      ] GC(26) Tenured: 27353K(91180K)->801K(68288K)
+
+[891,274s][debug][gc,heap      ] GC(26) Heap after GC invocations=23 (full 7):
+[891,274s][debug][gc,heap      ] GC(26)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[891,274s][debug][gc,heap      ] GC(26)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[891,274s][debug][gc,heap      ] GC(26)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[891,274s][debug][gc,heap      ] GC(26)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[891,274s][debug][gc,heap      ] GC(26)  tenured generation   total 68288K, used 801K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+[891,274s][debug][gc,heap      ] GC(26)    the space 68288K,   1% used [0x00000000d5550000, 0x00000000d56187a8, 0x00000000d5618800, 0x00000000d9800000)
+Performed 2. System.gc()
+
+VmRSS:	  142032 kB
+Press <Enter>
+----
+
+Notice how both, the current and the new shrink factor are misleadingly printed as zero instead of 100. This will be fixed by https://bugs.openjdk.java.net/browse/JDK-8270100[JDK-8270100].
+
+=== `-XX:MaxHeapFreeRatio`
+
+As we've seen in the previous section, even with `-XX:-ShrinkHeapInSteps` we still need two full GC cycles to return to the initial heap layout before the temporary allocation of 512m. This is because after the first `System.gc()` Tenured still contains 27353.2k of uncollected objects and in order to comply to the default setting of 70% `MaxHeapFreeRatio` we can't shrink Tenured below 91177.4k (i.e. 27353.2k / (1 - 0.70) == 91177.4k). However, if we relax this requirement to just 50% `MaxHeapFreeRatio` (i.e. 27353.2k / (1 - 0.50) == 54706.4k) we will be able to shrink Tenured back to its initial size right after the first full GC:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=100m -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace -XX:NewSizeThreadIncrease=0 -XX:-ShrinkHeapInSteps -XX:MaxHeapFreeRatio=50 Uncommit
+...
+[3,343s][trace][gc,heap      ] GC(25) CardGeneration::compute_new_size:
+[3,343s][trace][gc,heap      ] GC(25)     minimum_free_percentage:   0,40  maximum_used_percentage:   0,60
+[3,343s][trace][gc,heap      ] GC(25)      free_after_gc   : 671719,0K   used_after_gc   : 27353,0K   capacity_after_gc   : 699072,0K
+[3,343s][trace][gc,heap      ] GC(25)      free_percentage:   0,96
+[3,343s][trace][gc,heap      ] GC(25)     maximum_free_percentage:   0,50  minimum_used_percentage:   0,50
+[3,343s][trace][gc,heap      ] GC(25)     _capacity_at_prologue: 699072,0K  minimum_desired_capacity: 68288,0K  maximum_desired_capacity: 68288,0K
+[3,343s][trace][gc,heap      ] GC(25)     shrinking:  initSize: 68288,0K  maximum_desired_capacity: 68288,0K
+[3,343s][trace][gc,heap      ] GC(25)     shrink_bytes: 630784,0K  current_shrink_factor: 0  new shrink factor: 0  _min_heap_delta_bytes: 192,0K
+[3,366s][trace][gc,heap      ] GC(25) Shrinking tenured generation from 699072K to 68288K
+
+[3,366s][info ][gc,heap      ] GC(25) DefNew: 14926K(30720K)->0K(30720K) Eden: 11534K(27328K)->0K(27328K) From: 3392K(3392K)->0K(3392K)
+[3,366s][info ][gc,heap      ] GC(25) Tenured: 529002K(699072K)->27352K(68288K)
+
+[3,366s][debug][gc,heap      ] GC(25) Heap after GC invocations=22 (full 6):
+[3,366s][debug][gc,heap      ] GC(25)  def new generation   total 30720K, used 0K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+[3,366s][debug][gc,heap      ] GC(25)   eden space 27328K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ab0000)
+[3,366s][debug][gc,heap      ] GC(25)   from space 3392K,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
+[3,366s][debug][gc,heap      ] GC(25)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
+[3,366s][debug][gc,heap      ] GC(25)  tenured generation   total 68288K, used 27352K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+[3,366s][debug][gc,heap      ] GC(25)    the space 68288K,  40% used [0x00000000d5550000, 0x00000000d70063e0, 0x00000000d7006400, 0x00000000d9800000)
+Performed 1. System.gc()
+
+VmRSS:	  141464 kB
+Press <Enter>
+----
+
+Choosing a smaller value for `MaxHeapFreeRatio` allows more memory to be freed from Tenured and returned back to the OS. However, the smaller we choose it the fewer head room we leave in Tenured which might lead to more frequent expansions in the case that new allocations require more memory. We also have to ensure that `MaxHeapFreeRatio` must be greater than or equal to `MinHeapFreeRatio`.
+
+=== `-XX:InitialHeapSize`
+
+With all the current tuning we still can't reach an RSS footprint below ~140m which is still ~100m more than to initial RSS size before the temporary allocation of 512m of data. The reason for this difference is the fact that although we've returned all unused Java heap to the OS, the remaining committed part of the heap is now completely touched (i.e. mapped to physical memory). But if we know that the allocation of 512m is just a temporary, exceptional event and our application runs just fine with a much smaller heap, we can easily configure a significantly smaller `InitialHeapSize`. If we set `InitialHeapSize` to just 1m and both, `MinHeapFreeRatio` and `MaxHeapFreeRatio` to 10% we will get the following behavior:
+
+[source, console?prompt=$, options="nowrap", highlight=1]
+----
+$ java -XX:+UseSerialGC -XX:InitialHeapSize=1m -XX:MaxHeapSize=1g -Xlog:gc+heap*=trace -XX:NewSizeThreadIncrease=0 -XX:-ShrinkHeapInSteps -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=10 Uncommit
+...
+Calling System.gc()
+...
+[0,117s][debug][gc,heap      ] GC(1) Heap after GC invocations=2 (full 1):
+[0,117s][debug][gc,heap      ] GC(1)  def new generation   total 1152K, used 0K [0x00000000c0000000, 0x00000000c0140000, 0x00000000d5550000)
+[0,118s][debug][gc,heap      ] GC(1)   eden space 1024K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c0100000)
+[0,118s][debug][gc,heap      ] GC(1)   from space 128K,   0% used [0x00000000c0120000, 0x00000000c0120000, 0x00000000c0140000)
+[0,118s][debug][gc,heap      ] GC(1)   to   space 128K,   0% used [0x00000000c0100000, 0x00000000c0100000, 0x00000000c0120000)
+[0,118s][debug][gc,heap      ] GC(1)  tenured generation   total 768K, used 736K [0x00000000d5550000, 0x00000000d5610000, 0x0000000100000000)
+[0,118s][debug][gc,heap      ] GC(1)    the space 768K,  95% used [0x00000000d5550000, 0x00000000d56080b8, 0x00000000d5608200, 0x00000000d5610000)
+...
+VmRSS:	   40288 kB
+
+Press <Enter>
+...
+----
+
+Before the allocation of 512m, the young generation is now just 1280k (i.e. 1024k + 128k + 128k = 1280k) and Tenured just 768k. Notice that the JVM already ran an implicit GC before we explicitly called `System.gc()` for the first time to free some space in the small, one megabyte large initial heap. The overall RSS footprint of the process is still ~40m.
+
+[source, console?prompt=$, options="nowrap"]
+----
+...
+[592,632s][debug][gc,heap      ] GC(597) Heap after GC invocations=555 (full 44):
+[592,632s][debug][gc,heap      ] GC(597)  def new generation   total 1152K, used 128K [0x00000000c0000000, 0x00000000c0140000, 0x00000000d5550000)
+[592,632s][debug][gc,heap      ] GC(597)   eden space 1024K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c0100000)
+[592,632s][debug][gc,heap      ] GC(597)   from space 128K, 100% used [0x00000000c0100000, 0x00000000c0120000, 0x00000000c0120000)
+[592,632s][debug][gc,heap      ] GC(597)   to   space 128K,   0% used [0x00000000c0120000, 0x00000000c0120000, 0x00000000c0140000)
+[592,632s][debug][gc,heap      ] GC(597)  tenured generation   total 584356K, used 542504K [0x00000000d5550000, 0x00000000f8ff9000, 0x0000000100000000)
+[592,632s][debug][gc,heap      ] GC(597)    the space 584356K,  92% used [0x00000000d5550000, 0x00000000f671a368, 0x00000000f671a400, 0x00000000f8ff9000)
+...
+Successfully allocated 512MB memory
+VmRSS:	  584388 kB
+
+Press <Enter>
+----
+
+After the allocation of 512m of data, the RSS usage of ~580m is slightly smaller compared to the ~600m with the default settings for `MinHeapFreeRatio` and `MaxHeapFreeRatio` and an `InitialHeapSize` of 100m. However, notice how with these somehow _extreme_ settings, the JVM has to run 597 implicit garbage collections (out of which 44 are full GCs) to permit the allocation of 512m data. With the default settings and 100m `InitialHeapSize` only 24 implicit GCs (out of which 5 are full ones) were necessary.
+
+On the other hand, the first full GC after the allocation now instantly reduces the RSS footprint back to ~42m which is only minimally higher compared to the ~40m before the allocation:
+
+[source, console?prompt=$, options="nowrap"]
+----
+...
+[1209,215s][trace][gc,heap      ] GC(598) Shrinking tenured generation from 584356K to 2712K
+[1209,215s][info ][gc,heap      ] GC(598) DefNew: 1110K(1152K)->0K(1152K) Eden: 982K(1024K)->0K(1024K) From: 128K(128K)->0K(128K)
+[1209,215s][info ][gc,heap      ] GC(598) Tenured: 542504K(584356K)->2439K(2712K)
+[1209,215s][debug][gc,heap      ] GC(598) Heap after GC invocations=556 (full 45):
+[1209,215s][debug][gc,heap      ] GC(598)  def new generation   total 1152K, used 0K [0x00000000c0000000, 0x00000000c0140000, 0x00000000d5550000)
+[1209,215s][debug][gc,heap      ] GC(598)   eden space 1024K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c0100000)
+[1209,215s][debug][gc,heap      ] GC(598)   from space 128K,   0% used [0x00000000c0100000, 0x00000000c0100000, 0x00000000c0120000)
+[1209,215s][debug][gc,heap      ] GC(598)   to   space 128K,   0% used [0x00000000c0120000, 0x00000000c0120000, 0x00000000c0140000)
+[1209,215s][debug][gc,heap      ] GC(598)  tenured generation   total 2712K, used 2439K [0x00000000d5550000, 0x00000000d57f6000, 0x0000000100000000)
+[1209,215s][debug][gc,heap      ] GC(598)    the space 2712K,  89% used [0x00000000d5550000, 0x00000000d57b1d40, 0x00000000d57b1e00, 0x00000000d57f6000)
+...
+Performed 1. System.gc()
+
+VmRSS:	   42660 kB
+Press <Enter>
+----
+
+== Summary
+
+In the end, we can tune Serial GC to either always consume just the absolutely required minimum heap memory (which results in increased CPU usage due to more frequent GCs) or to favor fewer GC cycles at the expense of a higher memory footprint. It's up to the user to choose the right balance for his application and runtime environment.
+
+We've also seen that configuring and tuning the JVM can be quite tricky. We should always make sure that the numbers we measure really match up, we should ever believe just a single source of information and always try to double check our results at different levels with different tools.

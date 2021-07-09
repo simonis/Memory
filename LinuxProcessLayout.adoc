@@ -2,12 +2,12 @@
 Volker Simonis, {docdate} {doctime}
 :toc:
 :toc-placement!:
-:source-highlighter: pygments
+:source-highlighter: rouge
 :icons: font
 :listing-caption: Listing
 :xrefstyle: short
-:docinfo: private
-:docinfodir: docs/styles/
+:docinfo: shared
+:docinfodir: styles/
 ifdef::env-github[]
 :tip-caption: :bulb:
 :note-caption: :information_source:
@@ -24,7 +24,7 @@ asciidoctor  -a pygments-stylesheet=manni -a linkcss -a stylesheet=colony.css -a
 
 This is a tiny writeup (mostly for me such that I don't forget about it :) how a simple, 64-bit Linux process is laid out in memory and how a processes memory consumption can be analyzed. A future article will then focus on the native memory layout and consumption of a Java process.
 
-ifdef::env-github[TIP: You can read a much more nicely formatted version at https://simonis.github.io/Memory]
+ifdef::env-github[TIP: You can read a much more nicely formatted version at https://simonis.github.io/Memory/LinuxProcessLayout.html]
 
 == The basics
 
@@ -33,12 +33,12 @@ The precesses memory space layout is platform specific. On current x86_64 CPU's 
 [source, options="nowrap"]
 ----
 0000000000000000 - 00007fffffffffff (=47 bits) user space, different per mm
-hole caused by [47:63] sign extension
+                                               hole caused by [47:63] sign extension
 ffff800000000000 - ffff87ffffffffff (=43 bits) guard hole, reserved for hypervisor
-ffff880000000000 - ffffc7ffffffffff (=64 TB) direct mapping of all phys. memory <1>
+ffff880000000000 - ffffc7ffffffffff (=64 TB)   direct mapping of all phys. memory <1>
 ...
-ffffffffff600000 - ffffffffff600fff (=4 kB) legacy vsyscall ABI
-ffffffffffe00000 - ffffffffffffffff (=2 MB) unused hole
+ffffffffff600000 - ffffffffff600fff (=4 kB)    legacy vsyscall ABI
+ffffffffffe00000 - ffffffffffffffff (=2 MB)    unused hole
 ----
 
 As you can see, this gives us a virtual address space of 48 bits where 47 bits can be used for user space programs, to address at most 128 TB of memory. Because this article focuses on the user space, I've omitted most of the predefined kernel space regions. It's just interesting to see &#x278a;, that the kernel maps the complete physical memory into the kernel address space for convenience. Notice, that current x86_64 CPUs can only address a maximum of 64 TB because they https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961[limit the physical addresses to 46 bits] (i.e. a program can use a virtual address space of 128 TB but only 64 TB out of the 128 can be physically mapped). Future versions of x86_64 CPUs will be able to use 57 bits for the virtual address space (resulting in a 56 bits or 128 PiB user space) and up to https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf#G6.1034961[52 bits for physical addresses] (resulting in up to 4 PiB of physical memory). This new hardware generation requires an extended, https://lwn.net/Articles/717293/[5-level page table] as described in Intel's https://software.intel.com/sites/default/files/managed/2b/80/5-level_paging_white_paper.pdf["5-Level Paging and 5-Level EPT"] white paper and recently implemented in the Linux https://lwn.net/Articles/716916/[4.12 kernel]. The resulting, new virtual memory map is described in the previously mentioned https://www.kernel.org/doc/Documentation/x86/x86_64/mm.txt[`mm.txt`] kernel documentation file as well.
@@ -93,11 +93,11 @@ ffffffffff600000 r-xp 00000000  00:00     0    4    0   0          0         0  
 
 If called only with a PID argument, the output of `pmap` will be more compact and only contain the _Address_, _Perm_, _Size_ and _Mapping_ columns. If called with `-X` or `-XX`, it will display more of / all off the information exposed by the kernel through `/proc/PID/smaps`. This content may vary across kernel versions. In our concrete example (with `-X`) the _Address_ column contains the start address of a mapping. _Perm_ displays the permission bits (`r` = read, `w` = write, `x` = execute, `p`/`s` = private/shared mapping). _Offset_ contains the offset into the mapped file and will be zero for all non-file (i.e. _anonymous_ mappings). The same holds true for the _Device_ and _Inode_ columns which are relevant for file mappings only. The _Size_ column contains the size of the memory mapping in kilobytes (notice however that the kernel can only map memory in chunks which are a multiple of the "kernel page size" - normally 4 KB on x86). The _RSS_ ("Resident Set Size") column displays the amount of memory which is actually in RAM while the _PSS_ (https://lwn.net/Articles/230975/["Proportional Set Size"]) column is the amount of memory in RAM divided by the number of processes sharing it.
 
-As you can see, all the lines excluding the last one describe memory regions in user space. Notice that the last page of the user space (i.e. `0x7ffffffff000-0x7ffffffff000` &#x278a;) will not be displayed by `pmap` nor is it recorded in the corresponding `/proc/<pid>/smaps` file. As https://github.com/torvalds/linux/blob/b18cb64ead400c01bf1580eeba330ace51f8087d/arch/x86/include/asm/processor.h#L757[described in the kernel sources], this special guard page (i.e. 4 KB) is an implementation detail only required on x86_64 CPUs (and included here for completeness).
+As you can see, all the lines excluding the last one describe memory regions in user space. Notice that the last page of the user space (i.e. `0x7ffffffff000-0x7ffffffff000` callout:1[]) will not be displayed by `pmap` nor is it recorded in the corresponding `/proc/<pid>/smaps` file. As https://github.com/torvalds/linux/blob/b18cb64ead400c01bf1580eeba330ace51f8087d/arch/x86/include/asm/processor.h#L757[described in the kernel sources], this special guard page (i.e. 4 KB) is an implementation detail only required on x86_64 CPUs (and included here for completeness).
 
-The last line (i.e. `0xffffffffff600000...[vsyscall]` &#x278b;) refers to a 4 KB page in the kernel space which has been mapped into the user space. It is relict of an early and now deprecated implementation of so called https://lwn.net/Articles/446528/["virtual system calls"]. Virtual system calls are used to speed up the implementation of certain system calls like http://man7.org/linux/man-pages/man5/gettimeofday.5.html[`gettimeofday()`] which only need read access to certain kernel variables. The idea is to implement these system calls such that they don't switch into kernel mode because the kernel maps the required data read-only into the user space memory. This is exactly what the `[vsyscall]` mapping is used for: it contains the code and the variables for the mentioned virtual system calls.
+The last line (i.e. `0xffffffffff600000...[vsyscall]` callout:2[]) refers to a 4 KB page in the kernel space which has been mapped into the user space. It is relict of an early and now deprecated implementation of so called https://lwn.net/Articles/446528/["virtual system calls"]. Virtual system calls are used to speed up the implementation of certain system calls like http://man7.org/linux/man-pages/man5/gettimeofday.5.html[`gettimeofday()`] which only need read access to certain kernel variables. The idea is to implement these system calls such that they don't switch into kernel mode because the kernel maps the required data read-only into the user space memory. This is exactly what the `[vsyscall]` mapping is used for: it contains the code and the variables for the mentioned virtual system calls.
 
-Unfortunately the size of the `[vsyscall]` region is restricted to 4 KB and it's location is fixed which is considered an unnecessarily security risk in the meantime. The `vsyscall` implementation has therefore been deprecated in favour of the new https://lwn.net/Articles/615809/[`vDSO`] (i.e. "virtual Dynamic Shared Object") implementation. This is a small shared library which is exported by the kernel (see http://man7.org/linux/man-pages/man7/vdso.7.html[`vdso(7)`]) and mapped into the user address space &#x278c;. With `vDSO` the kernel variables are mapped into an extra, read-only memory region called `[vvar]` &#x278d;. Both these regions have no size limitations and are subject to ASLR.
+Unfortunately the size of the `[vsyscall]` region is restricted to 4 KB and it's location is fixed which is considered an unnecessarily security risk in the meantime. The `vsyscall` implementation has therefore been deprecated in favour of the new https://lwn.net/Articles/615809/[`vDSO`] (i.e. "virtual Dynamic Shared Object") implementation. This is a small shared library which is exported by the kernel (see http://man7.org/linux/man-pages/man7/vdso.7.html[`vdso(7)`]) and mapped into the user address space callout:3[]. With `vDSO` the kernel variables are mapped into an extra, read-only memory region called `[vvar]` callout:4[]. Both these regions have no size limitations and are subject to ASLR.
 
 IMPORTANT: In order to get comparable results, we have to switch off _Address Space Layout Randomization_ (https://en.wikipedia.org/wiki/Address_space_layout_randomization[ASLR]) by executing `sudo sh -c "echo 0 > /proc/sys/kernel/randomize_va_space"`. ASLR was added to the Linux kernel back in https://lwn.net/Articles/121845/[version 2.6]. It is a technique for hardening the OS against various attacks (i.e. the https://en.wikipedia.org/wiki/Return-to-libc_attack["return to libc attack"]) which exploit memory corruption vulnerabilities in order to jump to well known code in the users address space. Randomizing the address where shared libraries, stacks, the heap and even the executable itself (if compiled with `-fPIE` and linked with `-pie`) are being loaded, makes it much more harder to effectively execute such attacks. But for our analysis, as well as during development (e.g. debugging) it is of course much more convenient, if the addresses of an executable remain constant across different runs.
 

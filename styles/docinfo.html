@@ -1,0 +1,46 @@
+<style>
+/* This will be inserted AFTER the default stylesheets and overide the values defined there! */
+
+/* Draw highlighted lines in source code listings in bold */
+.highlight code .hll {
+  font-weight: bold;
+}
+/* Prevent output from being too light in console listing blocks */
+.highlight code .go {
+  font-weight: normal;
+  color: #302d2d;
+}
+/* Draw the console prompt in a fancy color */
+.highlight code .gp {
+  color: #d25f0b;
+}
+
+/* Do not draw a background color and frame around inline code elements */
+:not(pre) > code {
+  color: inherit;
+  background-color: #f8f8f8;
+  padding: 0;
+  font-size: 0.8125em;
+}
+code {
+  color: inherit;
+  background-color: inherit;
+  -webkit-border-radius: inherit;
+  border-radius: inherit;
+}
+/* Do not increase the font size for listing blocks on bigger screens */
+@media only screen and (min-width: 768px) {
+  .literalblock pre, .literalblock pre[class], .listingblock pre, .listingblock pre[class] {
+    font-size: 0.8125em;
+  }
+}
+@media only screen and (min-width: 1280px) {
+  .literalblock pre, .literalblock pre[class], .listingblock pre, .listingblock pre[class] {
+    font-size: 0.8125em;
+  }
+}
+/* Styling callouts (for ":icons: font") */
+.conum[data-value] {
+  background-color: #4183c4;
+}
+</style>
