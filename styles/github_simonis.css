@@ -63,6 +63,8 @@ hr { -moz-box-sizing: content-box; box-sizing: content-box; height: 0; }
 
 /** Address styling not present in IE 8/9. */
 mark { background: #ff0; color: #000; }
+mark.level1 { background: #ffcc00; color: #000; }
+mark.level2 { background: #ff9900; color: #000; }
 
 /** Correct font family set oddly in Safari 5 and Chrome. */
 code, kbd, pre, samp { font-family: "Roboto Mono", monospace, serif; font-size: 1em; }
@@ -703,7 +705,7 @@ a span.icon > .fa { cursor: inherit; }
 .admonitionblock td.icon .icon-caution:before { content: "\f06d"; color: #bf3400; }
 .admonitionblock td.icon .icon-important:before { content: "\f06a"; color: #bf0000; }
 
-.conum[data-value] { display: inline-block; color: #fff !important; background-color: #333333; -webkit-border-radius: 100px; border-radius: 100px; text-align: center; font-size: 0.75em; width: 1.6em; height: 1.6em; line-height: 1.6em; font-family: "Roboto", "Open Sans", "DejaVu Sans", sans-serif; font-style: normal; font-weight: bold; }
+.conum[data-value] { display: inline-block; color: #fff !important; background-color: #333333; -webkit-border-radius: 100px; border-radius: 100px; text-align: center; font-size: 0.8em; width: 1.6em; height: 1.6em; line-height: 1.6em; font-family: "Roboto", "Open Sans", "DejaVu Sans", sans-serif; font-style: normal; font-weight: bold; }
 .conum[data-value] * { color: #fff !important; }
 .conum[data-value] + b { display: none; }
 .conum[data-value]:after { content: attr(data-value); }

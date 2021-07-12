@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 2.0.15">
-<meta name="author" content="Volker Simonis, 2021-07-09 19:24:37 UTC">
+<meta name="author" content="Volker Simonis, 2021-07-12 15:35:03 UTC">
 <title>Releases unused heap memory back to the OS or How to make sense of all these numbers</title>
 <link rel="stylesheet" href="./styles/github_simonis.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
@@ -61,11 +61,19 @@ code {
 <div id="header">
 <h1>Releases unused heap memory back to the OS or How to make sense of all these numbers</h1>
 <div class="details">
-<span id="author" class="author">Volker Simonis, 2021-07-09 19:24:37 UTC</span><br>
+<span id="author" class="author">Volker Simonis, 2021-07-12 15:35:03 UTC</span><br>
 </div>
 </div>
 <div id="content">
 <div id="preamble">
+<div class="sectionbody">
+<div class="paragraph">
+<p>The JVM has the ability to release unused heap memory back to the operating system. The exact details on how and when this happens depend on the selected garbage collection algorithm and can be controlled by various command line option. This blog explains how exactly releasing of memory works for SerialGC and explores the corresponding options. With the help of the built-in JVM supportability and logging facilities as well as with the help of native OS tools we will verify that the amount of virtual, committed and dirty memory of the JVM process behaves as expected.</p>
+</div>
+</div>
+</div>
+<div class="sect1">
+<h2 id="_heap_basics">Heap basics</h2>
 <div class="sectionbody">
 <div class="paragraph">
 <p>At startup the JVM determines values for the <code>InitialHeapSize</code> and <code>MaxHeapSize</code> based on the amount of system memory. These values can be inspected with <code>-XX:+PrintFlagsFinal</code>:</p>
@@ -106,31 +114,31 @@ code {
 </span><span class="c">...</span>
 <span class="go">Calling System.gc()</span>
 <span class="go">GC(0) Heap before GC invocations=0 (full 0):</span>
-<span class="go">GC(0)  def new generation   total <mark>30720K</mark>, used 2733K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)</span>
+<span class="go">GC(0)  def new generation   total <mark>30720K</mark>, used 2733K [<mark class="level1">0x00000000c0000000</mark>, <mark class="level1">0x00000000c2150000</mark>, <mark class="level2">0x00000000d5550000</mark>)</span>
 <span class="go">GC(0)   eden space <mark>27328K</mark>,  10% used [0x00000000c0000000, 0x00000000c02ab448, 0x00000000c1ab0000)</span>
 <span class="go">GC(0)   from space <mark>3392K</mark>,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)</span>
 <span class="go">GC(0)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)</span>
-<span class="go">GC(0)  tenured generation   total <mark>68288K</mark>, used 0K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)</span>
+<span class="go">GC(0)  tenured generation   total <mark>68288K</mark>, used 0K [<mark class="level2">0x00000000d5550000</mark>, <mark class="level2">0x00000000d9800000</mark>, <mark class="level2">0x0000000100000000</mark>)</span>
 <span class="go">GC(0)    the space 68288K,   0% used [0x00000000d5550000, 0x00000000d5550000, 0x00000000d5550200, 0x00000000d9800000)</span>
 <span class="c">...</span></code></pre>
 </div>
 </div>
 <div class="paragraph">
-<p>Before this very first GC Eden and From sum up to New (i.e. <mark>27328k</mark> + <mark>3392k</mark> == <mark>30720k</mark>) and New plus Tenured plus To sum up to InitialHeapSize (i.e. <mark>30720k</mark> + <mark>68288k</mark> + 3392k == 102400k == <mark>100m</mark>). Notice how the size of New is given as 30720 which only includes Eden and From because out of From and To only one will be active at any given time. In reality, New occupies 34112k (i.e. Eden + From + To) and this can be easily computed from (0x00000000c2150000 - 0x00000000c0000000) / 1024. 0x00000000c0000000 is the starting address of New and 0x00000000c2150000 is the end address of its currently active part (i.e. the initially committed part). The maximum reserved size of New is 349504k and it goes from 0x00000000c0000000 to 0x00000000d5550000.</p>
+<p>Before this very first GC Eden and From sum up to New (i.e. <mark>27328k</mark> + <mark>3392k</mark> == <mark>30720k</mark>) and New plus Tenured plus To sum up to InitialHeapSize (i.e. <mark>30720k</mark> + <mark>68288k</mark> + 3392k == 102400k == <mark>100m</mark>). Notice how the size of New is given as 30720 which only includes Eden and From because out of From and To only one will be active at any given time. In reality, New occupies 34112k (i.e. Eden + From + To) and this can be easily computed from (<mark class="level1">0x00000000c2150000</mark> - <mark class="level1">0x00000000c0000000</mark>) / 1024. 0x00000000c0000000 is the starting address of New and 0x00000000c2150000 is the end address of its currently active part (i.e. the initially committed part). The maximum reserved size of New is 349504k and it goes from 0x00000000c0000000 to 0x00000000d5550000.</p>
 </div>
 <div class="paragraph">
-<p>For Tenured, the currently active (i.e. committed) part has a size of 68288K (from 0x00000000d5550000 to 0x00000000d9800000) while its reserved size (i.e. 699072k) starts at 0x00000000d5550000 and ends at 0x0000000100000000. The reserved sizes for New and Tenured sum up to MaxHeapSize (i.e. 349504k + 699072k == 1048576k == 1g).</p>
+<p>For Tenured, the currently active (i.e. committed) part has a size of 68288K (from <mark class="level2">0x00000000d5550000</mark> to <mark class="level2">0x00000000d9800000</mark>) while its reserved size (i.e. 699072k) starts at 0x00000000d5550000 and ends at <mark class="level2">0x0000000100000000</mark>. The reserved sizes for New and Tenured sum up to MaxHeapSize (i.e. 349504k + 699072k == 1048576k == 1g).</p>
 </div>
 <div class="paragraph">
-<p>New occupies ~33% (i.e. 349504k / 1048576k == 0.33) and Tenured ~66% (i.e. 699072k / 1048576k == 0.66) of the total reserved heap which corresponds to an Old/New ratio of 2 as specified by the default value for <code>-XX:NewRatio</code>. This is also the ratio of the initially committed parts of New and Tenured (i.e. 34112k / 102400k == 0.33 for New and 68288k / 102400k == 0.66 for Tenured).</p>
+<p>New occupies ~33% (i.e. 349504k / 1048576k == 0.33) and Tenured ~66% (i.e. 699072k / 1048576k == 0.66) of the total reserved heap which corresponds to an Old/New ratio of 2 as specified by the default value for <code>-XX:NewRatio</code>. This is also the ratio of the initially committed parts of New and Tenured (i.e. <mark>34112k</mark> / 102400k == 0.33 for New and <mark>68288k</mark> / 102400k == 0.66 for Tenured).</p>
 </div>
 <div class="listingblock">
 <div class="content">
 <pre class="rouge highlight nowrap"><code data-lang="console"><span class="c">...
-</span><span class="go">[0,624s][debug][gc,ergo,heap ] GC(0) New generation size 34112K-&gt;34176K [eden=27392K,survivor=3392K]
-[0,624s][trace][gc,ergo,heap ] GC(0)   [allowed 5K extra for 1 threads]
+</span><span class="go">[0,624s][debug][gc,ergo,heap ] GC(0) New generation size <mark>34112K</mark>-&gt;34176K [eden=27392K,survivor=3392K]
+[0,624s][trace][gc,ergo,heap ] GC(0)   [<mark class="level1">allowed 5K extra for 1 threads</mark>]
 [0,624s][info ][gc,heap      ] GC(0) DefNew: 2733K(30720K)-&gt;0K(30784K) Eden: 2733K(27328K)-&gt;0K(27392K) From: 0K(3392K)-&gt;0K(3392K)
-[0,624s][info ][gc,heap      ] GC(0) Tenured: 0K(68288K)-&gt;689K(68288K)
+[0,624s][info ][gc,heap      ] GC(0) Tenured: 0K(<mark>68288K</mark>)-&gt;689K(68288K)
 [0,624s][debug][gc,heap      ] GC(0) Heap after GC invocations=1 (full 1):
 [0,624s][debug][gc,heap      ] GC(0)  def new generation   total 30784K, used 0K [0x00000000c0000000, 0x00000000c2160000, 0x00000000d5550000)
 [0,624s][debug][gc,heap      ] GC(0)   eden space 27392K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ac0000)
@@ -142,7 +150,7 @@ code {
 </div>
 </div>
 <div class="paragraph">
-<p>As you can see, after the first full GC, the size of New will be adjusted to accommodate the number of Java threads (1 in our case). Notice that as of the writing of this blog, a stock OpenJDK will always prints <code>"0k extra for 0 threads"</code>. This logging error will be fixed by <a href="https://bugs.openjdk.java.net/browse/JDK-8270100">JDK-8270100</a>.</p>
+<p>As you can see, after the first full GC, the size of New will be adjusted to accommodate the number of Java threads (1 in our case). Notice that as of the writing of this blog, a stock OpenJDK will always prints <code><mark class="level1">"allow 0k extra for 0 threads"</mark></code>. This logging error will be fixed by <a href="https://bugs.openjdk.java.net/browse/JDK-8270100">JDK-8270100</a>.</p>
 </div>
 <div class="paragraph">
 <p>To simplify further analysis we can disable this resizing by setting <code>-XX:NewSizeThreadIncrease</code> to 0. We also set <code>-XX:NativeMemoryTracking=summary</code> so we can use NMT to verify the GC log output:</p>
@@ -167,13 +175,13 @@ code {
 </div>
 </div>
 <div class="paragraph">
-<p>The NMT information for our application confirms the reserved (i.e.1048576k == 1g) and committed (i.e. 102400k == 100m) heap sizes we&#8217;ve calculated from the GC log before:</p>
+<p>The NMT information for our application confirms the reserved (i.e.<mark>1048576k</mark> == 1g) and committed (i.e. <mark>102400k</mark> == 100m) heap sizes we&#8217;ve calculated from the GC log before:</p>
 </div>
 <div class="listingblock">
 <div class="content">
 <pre class="rouge highlight nowrap"><code data-lang="console"><span class="hll"><span class="gp">$</span><span class="w"> </span>jcmd Uncommit VM.native_memory
 </span><span class="c">...</span>
-<span class="go">-                 Java Heap (reserved=1048576KB, committed=102400KB)</span>
+<span class="go">-                 Java Heap (reserved=<mark>1048576KB</mark>, committed=<mark>102400KB</mark>)</span>
 <span class="go">                            (mmap: reserved=1048576KB, committed=102400KB)</span>
 <span class="c">...</span></code></pre>
 </div>
@@ -186,9 +194,9 @@ code {
 <pre class="rouge highlight nowrap"><code data-lang="console"><span class="hll"><span class="gp">$</span><span class="w"> </span>pmap <span class="nt">-x</span> 17126
 </span><span class="c">...</span>
 <span class="go">Address           Kbytes     RSS   Dirty Mode  Mapping</span>
-<span class="go">00000000c0000000   34112    1408    1408 rw---   [ anon ]</span>
+<span class="go">00000000c0000000   34112    1408    1408 rw---   [ anon ]    </span><i class="conum" data-value="1"></i><b>(1)</b>
 <span class="go">00000000c2150000  315392       0       0 -----   [ anon ]</span>
-<span class="go">00000000d5550000   68288     736     736 rw---   [ anon ]</span>
+<span class="go">00000000d5550000   68288     736     736 rw---   [ anon ]    </span><i class="conum" data-value="2"></i><b>(2)</b>
 <span class="go">00000000d9800000  630784       0       0 -----   [ anon ]</span>
 <span class="go">0000000800000000      12      12      12 rwx-- classes.jsa</span>
 <span class="go">0000000800003000    4348    4052    3140 rw--- classes.jsa</span>
@@ -199,10 +207,10 @@ code {
 </div>
 </div>
 <div class="paragraph">
-<p>"rw" (i.e. read/write) mode means that the corresponding mapping has been committed while an empty mode indicates a virtual memory mapping which has only been reserved but not yet committed. "RSS" (i.e. resident set size) denotes the part of the corresponding mapping which is actually present in physical memory. If a virtual memory mapping is backed up by a file, the "Mapping" section contains the file name (e.g. <code>classes.jsa</code> for the CDS, i.e. class data sharing archive). For the Java heap <code>[ anon ]</code> indicates that it is an anonymous mapping. Finally, the "Dirty" column prints the amount of memory which has been changed with respect to the primary source of the mapping. For anonymous mappings like the Java heap, RSS is equal to Dirty but for file mappings like the CDS archive we can see that for writable sections some parts might still correspond to the original data in the file and Dirty &lt;= RSS &lt;= Kbytes. For read-only mappings, the application can&#8217;t change the data so Dirty will always be zero (see <a href="https://simonis.github.io/JavaZone2018/CDS/cds.xhtml#/10/1">slides</a>/https://vimeo.com/289644820#t=2789s[video] for more details about the CDS sections and layout).</p>
+<p>"rw" (i.e. read/write) mode means that the corresponding mapping has been committed while an empty mode indicates a virtual memory mapping which has only been reserved but not yet committed. "RSS" (i.e. resident set size) denotes the part of the corresponding mapping which is actually present in physical memory. If a virtual memory mapping is backed up by a file, the "Mapping" section contains the file name (e.g. <code>classes.jsa</code> for the CDS, i.e. class data sharing archive). For the Java heap <code>[ anon ]</code> indicates that it is an anonymous mapping. Finally, the "Dirty" column prints the amount of memory which has been changed with respect to the primary source of the mapping. For anonymous mappings like the Java heap, RSS is equal to Dirty but for file mappings like the CDS archive we can see that for writable sections some parts might still correspond to the original data in the file and Dirty &lt;= RSS &lt;= Kbytes. For read-only mappings, the application can&#8217;t change the data so Dirty will always be zero (see these <a href="https://simonis.github.io/JavaZone2018/CDS/cds.xhtml#/10/1">slides</a> and <a href="https://vimeo.com/289644820#t=2789s">presentation</a> for more details about the CDS sections and layout).</p>
 </div>
 <div class="paragraph">
-<p>For the Java heap we can see that a slice of 34112k (which is exactly the size of "Eden + From + To") and another one of 68288k (which corresponds to the size of Tenured) are committed while the remaining part of the heap (315392k + 630784k == 946176k == 1048576k - 102400k == 1048576 - (34112k + 68288k)) is only reserved. The interesting and maybe surprising part of this itemization is the fact that out of the 102400k committed Java heap (as displayed by the GC log and NMT) only 2144k (i.e. 1408k + 736k) are initially mapped to physical memory and account for the process' RSS.</p>
+<p>For the Java heap we can see that a slice of 34112k <i class="conum" data-value="1"></i><b>1</b>(which is exactly the size of "Eden + From + To") and another one of 68288k <i class="conum" data-value="2"></i><b>2</b>(which corresponds to the size of Tenured) are committed while the remaining part of the heap (315392k + 630784k == 946176k == 1048576k - 102400k == 1048576 - (34112k + 68288k)) is only reserved. The interesting and maybe surprising part of this itemization is the fact that out of the 102400k committed Java heap (as displayed by the GC log and NMT) only 2144k (i.e. 1408k + 736k) are initially mapped to physical memory and account for the process' RSS.</p>
 </div>
 <div class="paragraph">
 <p>It is also interesting to see that for the old generation the RSS portion reported by <code>pmap</code> corresponds exactly to the used part of that region as reported by the GC log if we align it to 4k pages (i.e. 736k == (733k + 4k) &amp; 0xfff8). For the new generation the 1408k RSS as reported by <code>pmap</code> is much smaller than the 2733k reported by the GC log as "used". This difference is caused by a feature called "thread local allocation buffer" (TLAB) which is used to speed up allocations. It works by assigning each thread an own, private chunk of Eden such that it doesn&#8217;t need to synchronize with other threads for each allocation. For the GC log, these parts of Eden count as "used", although the threads owning them might not have filled them up (i.e. touched them) completely. If we run our sample application with <code>-XX:-UseTLAB</code> we can see that the reported "used" size of 1393f for the new generation is much closer to the 1408k RSS as reported by <code>pmap</code>:</p>
@@ -231,6 +239,8 @@ code {
 <div class="paragraph">
 <p>To sum it up, we can see that after the first <code>System.gc()</code>, our Java process only uses ~40m of RSS (i.e. 41820k according to <code>pmap</code> and 40772k according to <code>Uncommit</code>s own accounting gathered from <code>/proc/self/status</code> and printed to stdout as <code>VmRSS: 40772 kB</code>). The Java heap only contributes 2144k (i.e. 1408k + 736k) to this amount.</p>
 </div>
+<div class="sect2">
+<h3 id="_allocating_memory">Allocating memory</h3>
 <div class="paragraph">
 <p>After pressing <code>&lt;Enter&gt;</code>, the application will allocate 512m in chunks of <code>int[256]</code> arrays (the amount of allocated megabytes can be configured with the first command line argument). The allocations will trigger several implicit GCs and increase the committed heap to accommodate for the new data. After all the allocations have been satisfied, we get the following output:</p>
 </div>
@@ -510,6 +520,7 @@ Press &lt;Enter&gt;</span></code></pre>
 </div>
 </div>
 </div>
+</div>
 <div class="sect1">
 <h2 id="_fine_tuning">Fine tuning</h2>
 <div class="sectionbody">
@@ -743,14 +754,14 @@ Press &lt;Enter&gt;</span></code></pre>
 <p>In the end, we can tune Serial GC to either always consume just the absolutely required minimum heap memory (which results in increased CPU usage due to more frequent GCs) or to favor fewer GC cycles at the expense of a higher memory footprint. It&#8217;s up to the user to choose the right balance for his application and runtime environment.</p>
 </div>
 <div class="paragraph">
-<p>We&#8217;ve also seen that configuring and tuning the JVM can be quite tricky. We should always make sure that the numbers we measure really match up, we should ever believe just a single source of information and always try to double check our results at different levels with different tools.</p>
+<p>We&#8217;ve also seen that configuring and tuning the JVM can be quite tricky. Always make sure that the numbers you measure really match up, never believe just a single source of information and always try to double check your results at different levels with different tools.</p>
 </div>
 </div>
 </div>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2021-07-09 19:24:37 UTC
+Last updated 2021-07-12 15:35:03 UTC
 </div>
 </div>
 </body>

@@ -1,5 +1,3 @@
-= Releases unused heap memory back to the OS or How to make sense of all these numbers
-Volker Simonis, {docdate} {doctime}
 :toc:
 :toc-placement!:
 :source-highlighter: rouge
@@ -15,6 +13,13 @@ ifdef::env-github[]
 :caution-caption: :fire:
 :warning-caption: :warning:
 endif::[]
+
+= Releases unused heap memory back to the OS or How to make sense of all these numbers
+Volker Simonis, {docdate} {doctime}
+
+The JVM has the ability to release unused heap memory back to the operating system. The exact details on how and when this happens depend on the selected garbage collection algorithm and can be controlled by various command line option. This blog explains how exactly releasing of memory works for SerialGC and explores the corresponding options. With the help of the built-in JVM supportability and logging facilities as well as with the help of native OS tools we will verify that the amount of virtual, committed and dirty memory of the JVM process behaves as expected.
+
+== Heap basics
 
 At startup the JVM determines values for the `InitialHeapSize` and `MaxHeapSize` based on the amount of system memory. These values can be inspected with `-XX:+PrintFlagsFinal`:
 
@@ -50,28 +55,28 @@ $ java -XX:+UseSerialGC -XX:InitialHeapSize=+++<mark>100m</mark>+++ -XX:MaxHeapS
 ...
 Calling System.gc()
 GC(0) Heap before GC invocations=0 (full 0):
-GC(0)  def new generation   total +++<mark>30720K</mark>+++, used 2733K [0x00000000c0000000, 0x00000000c2150000, 0x00000000d5550000)
+GC(0)  def new generation   total +++<mark>30720K</mark>+++, used 2733K [+++<mark class="level1">0x00000000c0000000</mark>+++, +++<mark class="level1">0x00000000c2150000</mark>+++, +++<mark class="level2">0x00000000d5550000</mark>+++)
 GC(0)   eden space +++<mark>27328K</mark>+++,  10% used [0x00000000c0000000, 0x00000000c02ab448, 0x00000000c1ab0000)
 GC(0)   from space +++<mark>3392K</mark>+++,   0% used [0x00000000c1ab0000, 0x00000000c1ab0000, 0x00000000c1e00000)
 GC(0)   to   space 3392K,   0% used [0x00000000c1e00000, 0x00000000c1e00000, 0x00000000c2150000)
-GC(0)  tenured generation   total +++<mark>68288K</mark>+++, used 0K [0x00000000d5550000, 0x00000000d9800000, 0x0000000100000000)
+GC(0)  tenured generation   total +++<mark>68288K</mark>+++, used 0K [+++<mark class="level2">0x00000000d5550000</mark>+++, +++<mark class="level2">0x00000000d9800000</mark>+++, +++<mark class="level2">0x0000000100000000</mark>+++)
 GC(0)    the space 68288K,   0% used [0x00000000d5550000, 0x00000000d5550000, 0x00000000d5550200, 0x00000000d9800000)
 ...
 ----
 
-Before this very first GC Eden and From sum up to New (i.e. +++<mark>27328k</mark>+++ + +++<mark>3392k</mark>+++ == +++<mark>30720k</mark>+++) and New plus Tenured plus To sum up to InitialHeapSize (i.e. +++<mark>30720k</mark>+++ + +++<mark>68288k</mark>+++ + 3392k == 102400k == +++<mark>100m</mark>+++). Notice how the size of New is given as 30720 which only includes Eden and From because out of From and To only one will be active at any given time. In reality, New occupies 34112k (i.e. Eden + From + To) and this can be easily computed from (0x00000000c2150000 - 0x00000000c0000000) / 1024. 0x00000000c0000000 is the starting address of New and 0x00000000c2150000 is the end address of its currently active part (i.e. the initially committed part). The maximum reserved size of New is 349504k and it goes from 0x00000000c0000000 to 0x00000000d5550000.
+Before this very first GC Eden and From sum up to New (i.e. +++<mark>27328k</mark>+++ + +++<mark>3392k</mark>+++ == +++<mark>30720k</mark>+++) and New plus Tenured plus To sum up to InitialHeapSize (i.e. +++<mark>30720k</mark>+++ + +++<mark>68288k</mark>+++ + 3392k == 102400k == +++<mark>100m</mark>+++). Notice how the size of New is given as 30720 which only includes Eden and From because out of From and To only one will be active at any given time. In reality, New occupies 34112k (i.e. Eden + From + To) and this can be easily computed from (+++<mark class="level1">0x00000000c2150000</mark>+++ - +++<mark class="level1">0x00000000c0000000</mark>+++) / 1024. 0x00000000c0000000 is the starting address of New and 0x00000000c2150000 is the end address of its currently active part (i.e. the initially committed part). The maximum reserved size of New is 349504k and it goes from 0x00000000c0000000 to 0x00000000d5550000.
 
-For Tenured, the currently active (i.e. committed) part has a size of 68288K (from 0x00000000d5550000 to 0x00000000d9800000) while its reserved size (i.e. 699072k) starts at 0x00000000d5550000 and ends at 0x0000000100000000. The reserved sizes for New and Tenured sum up to MaxHeapSize (i.e. 349504k + 699072k == 1048576k == 1g).
+For Tenured, the currently active (i.e. committed) part has a size of 68288K (from +++<mark class="level2">0x00000000d5550000</mark>+++ to +++<mark class="level2">0x00000000d9800000</mark>+++) while its reserved size (i.e. 699072k) starts at 0x00000000d5550000 and ends at +++<mark class="level2">0x0000000100000000</mark>+++. The reserved sizes for New and Tenured sum up to MaxHeapSize (i.e. 349504k + 699072k == 1048576k == 1g).
 
-New occupies ~33% (i.e. 349504k / 1048576k == 0.33) and Tenured ~66% (i.e. 699072k / 1048576k == 0.66) of the total reserved heap which corresponds to an Old/New ratio of 2 as specified by the default value for `-XX:NewRatio`. This is also the ratio of the initially committed parts of New and Tenured (i.e. 34112k / 102400k == 0.33 for New and 68288k / 102400k == 0.66 for Tenured).
+New occupies ~33% (i.e. 349504k / 1048576k == 0.33) and Tenured ~66% (i.e. 699072k / 1048576k == 0.66) of the total reserved heap which corresponds to an Old/New ratio of 2 as specified by the default value for `-XX:NewRatio`. This is also the ratio of the initially committed parts of New and Tenured (i.e. +++<mark>34112k</mark>+++ / 102400k == 0.33 for New and +++<mark>68288k</mark>+++ / 102400k == 0.66 for Tenured).
 
-[source, console?prompt=$, options="nowrap"]
+[source, console?prompt=$, options="nowrap", subs="+macros"]
 ----
 ...
-[0,624s][debug][gc,ergo,heap ] GC(0) New generation size 34112K->34176K [eden=27392K,survivor=3392K]
-[0,624s][trace][gc,ergo,heap ] GC(0)   [allowed 5K extra for 1 threads]
+[0,624s][debug][gc,ergo,heap ] GC(0) New generation size +++<mark>34112K</mark>+++->34176K [eden=27392K,survivor=3392K]
+[0,624s][trace][gc,ergo,heap ] GC(0)   [+++<mark class="level1">allowed 5K extra for 1 threads</mark>+++]
 [0,624s][info ][gc,heap      ] GC(0) DefNew: 2733K(30720K)->0K(30784K) Eden: 2733K(27328K)->0K(27392K) From: 0K(3392K)->0K(3392K)
-[0,624s][info ][gc,heap      ] GC(0) Tenured: 0K(68288K)->689K(68288K)
+[0,624s][info ][gc,heap      ] GC(0) Tenured: 0K(+++<mark>68288K</mark>+++)->689K(68288K)
 [0,624s][debug][gc,heap      ] GC(0) Heap after GC invocations=1 (full 1):
 [0,624s][debug][gc,heap      ] GC(0)  def new generation   total 30784K, used 0K [0x00000000c0000000, 0x00000000c2160000, 0x00000000d5550000)
 [0,624s][debug][gc,heap      ] GC(0)   eden space 27392K,   0% used [0x00000000c0000000, 0x00000000c0000000, 0x00000000c1ac0000)
@@ -82,7 +87,7 @@ New occupies ~33% (i.e. 349504k / 1048576k == 0.33) and Tenured ~66% (i.e. 69907
 ...
 ----
 
-As you can see, after the first full GC, the size of New will be adjusted to accommodate the number of Java threads (1 in our case). Notice that as of the writing of this blog, a stock OpenJDK will always prints `"0k extra for 0 threads"`. This logging error will be fixed by https://bugs.openjdk.java.net/browse/JDK-8270100[JDK-8270100].
+As you can see, after the first full GC, the size of New will be adjusted to accommodate the number of Java threads (1 in our case). Notice that as of the writing of this blog, a stock OpenJDK will always prints `+++<mark class="level1">"allow 0k extra for 0 threads"</mark>+++`. This logging error will be fixed by https://bugs.openjdk.java.net/browse/JDK-8270100[JDK-8270100].
 
 To simplify further analysis we can disable this resizing by setting `-XX:NewSizeThreadIncrease` to 0. We also set `-XX:NativeMemoryTracking=summary` so we can use NMT to verify the GC log output:
 
@@ -105,13 +110,13 @@ VmRSS:	   40772 kB
 Press <Enter>
 ----
 
-The NMT information for our application confirms the reserved (i.e.1048576k == 1g) and committed (i.e. 102400k == 100m) heap sizes we've calculated from the GC log before:
+The NMT information for our application confirms the reserved (i.e.+++<mark>1048576k</mark>+++ == 1g) and committed (i.e. +++<mark>102400k</mark>+++ == 100m) heap sizes we've calculated from the GC log before:
 
-[source, console?prompt=$, options="nowrap", highlight=1]
+[source, console?prompt=$, options="nowrap", highlight=1, subs="+macros"]
 ----
 $ jcmd Uncommit VM.native_memory
 ...
--                 Java Heap (reserved=1048576KB, committed=102400KB)
+-                 Java Heap (reserved=+++<mark>1048576KB</mark>+++, committed=+++<mark>102400KB</mark>+++)
                             (mmap: reserved=1048576KB, committed=102400KB)
 ...
 ----
@@ -123,9 +128,9 @@ But unfortunately, on Linux "committed" doesn't mean that a memory segment is ba
 $ pmap -x 17126
 ...
 Address           Kbytes     RSS   Dirty Mode  Mapping
-00000000c0000000   34112    1408    1408 rw---   [ anon ]
+00000000c0000000   34112    1408    1408 rw---   [ anon ]    <1>
 00000000c2150000  315392       0       0 -----   [ anon ]
-00000000d5550000   68288     736     736 rw---   [ anon ]
+00000000d5550000   68288     736     736 rw---   [ anon ]    <2>
 00000000d9800000  630784       0       0 -----   [ anon ]
 0000000800000000      12      12      12 rwx-- classes.jsa
 0000000800003000    4348    4052    3140 rw--- classes.jsa
@@ -135,9 +140,9 @@ Address           Kbytes     RSS   Dirty Mode  Mapping
 total kB         3470076   41820   14000
 ----
 
-"rw" (i.e. read/write) mode means that the corresponding mapping has been committed while an empty mode indicates a virtual memory mapping which has only been reserved but not yet committed. "RSS" (i.e. resident set size) denotes the part of the corresponding mapping which is actually present in physical memory. If a virtual memory mapping is backed up by a file, the "Mapping" section contains the file name (e.g. `classes.jsa` for the CDS, i.e. class data sharing archive). For the Java heap `[ anon ]` indicates that it is an anonymous mapping. Finally, the "Dirty" column prints the amount of memory which has been changed with respect to the primary source of the mapping. For anonymous mappings like the Java heap, RSS is equal to Dirty but for file mappings like the CDS archive we can see that for writable sections some parts might still correspond to the original data in the file and Dirty \<= RSS \<= Kbytes. For read-only mappings, the application can't change the data so Dirty will always be zero (see https://simonis.github.io/JavaZone2018/CDS/cds.xhtml#/10/1[slides]/https://vimeo.com/289644820#t=2789s[video] for more details about the CDS sections and layout).
+"rw" (i.e. read/write) mode means that the corresponding mapping has been committed while an empty mode indicates a virtual memory mapping which has only been reserved but not yet committed. "RSS" (i.e. resident set size) denotes the part of the corresponding mapping which is actually present in physical memory. If a virtual memory mapping is backed up by a file, the "Mapping" section contains the file name (e.g. `classes.jsa` for the CDS, i.e. class data sharing archive). For the Java heap `[ anon ]` indicates that it is an anonymous mapping. Finally, the "Dirty" column prints the amount of memory which has been changed with respect to the primary source of the mapping. For anonymous mappings like the Java heap, RSS is equal to Dirty but for file mappings like the CDS archive we can see that for writable sections some parts might still correspond to the original data in the file and Dirty \<= RSS \<= Kbytes. For read-only mappings, the application can't change the data so Dirty will always be zero (see these https://simonis.github.io/JavaZone2018/CDS/cds.xhtml#/10/1[slides] and https://vimeo.com/289644820#t=2789s[presentation] for more details about the CDS sections and layout).
 
-For the Java heap we can see that a slice of 34112k (which is exactly the size of "Eden + From + To") and another one of 68288k (which corresponds to the size of Tenured) are committed while the remaining part of the heap (315392k + 630784k == 946176k == 1048576k - 102400k == 1048576 - (34112k + 68288k)) is only reserved. The interesting and maybe surprising part of this itemization is the fact that out of the 102400k committed Java heap (as displayed by the GC log and NMT) only 2144k (i.e. 1408k + 736k) are initially mapped to physical memory and account for the process' RSS.
+For the Java heap we can see that a slice of 34112k callout:1[](which is exactly the size of "Eden + From + To") and another one of 68288k callout:2[](which corresponds to the size of Tenured) are committed while the remaining part of the heap (315392k + 630784k == 946176k == 1048576k - 102400k == 1048576 - (34112k + 68288k)) is only reserved. The interesting and maybe surprising part of this itemization is the fact that out of the 102400k committed Java heap (as displayed by the GC log and NMT) only 2144k (i.e. 1408k + 736k) are initially mapped to physical memory and account for the process' RSS.
 
 It is also interesting to see that for the old generation the RSS portion reported by `pmap` corresponds exactly to the used part of that region as reported by the GC log if we align it to 4k pages (i.e. 736k == (733k + 4k) & 0xfff8). For the new generation the 1408k RSS as reported by `pmap` is much smaller than the 2733k reported by the GC log as "used". This difference is caused by a feature called "thread local allocation buffer" (TLAB) which is used to speed up allocations. It works by assigning each thread an own, private chunk of Eden such that it doesn't need to synchronize with other threads for each allocation. For the GC log, these parts of Eden count as "used", although the threads owning them might not have filled them up (i.e. touched them) completely. If we run our sample application with `-XX:-UseTLAB` we can see that the reported "used" size of 1393f for the new generation is much closer to the 1408k RSS as reported by `pmap`:
 
@@ -162,6 +167,8 @@ $ java -Xlog:tlab*=trace -version
 ----
 
 To sum it up, we can see that after the first `System.gc()`, our Java process only uses ~40m of RSS (i.e. 41820k according to `pmap` and 40772k according to ``Uncommit``s own accounting gathered from `/proc/self/status` and printed to stdout as `VmRSS: 40772 kB`). The Java heap only contributes 2144k (i.e. 1408k + 736k) to this amount.
+
+### Allocating memory
 
 After pressing `<Enter>`, the application will allocate 512m in chunks of `int[256]` arrays (the amount of allocated megabytes can be configured with the first command line argument). The allocations will trigger several implicit GCs and increase the committed heap to accommodate for the new data. After all the allocations have been satisfied, we get the following output:
 
@@ -632,4 +639,4 @@ Press <Enter>
 
 In the end, we can tune Serial GC to either always consume just the absolutely required minimum heap memory (which results in increased CPU usage due to more frequent GCs) or to favor fewer GC cycles at the expense of a higher memory footprint. It's up to the user to choose the right balance for his application and runtime environment.
 
-We've also seen that configuring and tuning the JVM can be quite tricky. We should always make sure that the numbers we measure really match up, we should ever believe just a single source of information and always try to double check our results at different levels with different tools.
+We've also seen that configuring and tuning the JVM can be quite tricky. Always make sure that the numbers you measure really match up, never believe just a single source of information and always try to double check your results at different levels with different tools.
