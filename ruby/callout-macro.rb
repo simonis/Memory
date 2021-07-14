@@ -15,7 +15,7 @@ class CalloutMacro < Extensions::InlineMacroProcessor
 
   def process parent, target, attrs
     if parent.document.basebackend? 'html'
-      %(<i class="conum" data-value="#{target}"></i><b>#{target}</b>)
+      %(<code class="callout"><i class="conum" data-value="#{target}"></i><b>#{target}</b></code>)
     else
       %(#{target})
     end
