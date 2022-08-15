@@ -84,26 +84,31 @@ int main(int argc, char **argv) {
   fprintf(stdout, "map[%d] == *%p == %d\n", ps * (NR_PAGES * 3) / 4, &map[ps * (NR_PAGES * 3) / 4], map[ps * (NR_PAGES * 3) / 4]);
   rss(map, ps * NR_PAGES);
   fprintf(stdout, "NOTICE: after reading from the MADV_DONTNEED page, 'mincore()' reports the page as resident while 'pmap' still reports it as non-resident!\n");
+  fprintf(stdout, "NOTICE: reading from a MADV_DONTNEED page returns `0` and not the initial content (see `man madvise`)!\n");
   getchar();
 
   map[ps * (NR_PAGES * 3) / 4] = 99;
   fprintf(stdout, "Assigning 99 to map[%d] == *%p\n", ps * (NR_PAGES * 3) / 4, &map[ps * (NR_PAGES * 3) / 4]);
   fprintf(stdout, "map[%d] == *%p == %d\n", ps * (NR_PAGES * 3) / 4, &map[ps * (NR_PAGES * 3) / 4], map[ps * (NR_PAGES * 3) / 4]);
   rss(map, ps * NR_PAGES);
+  fprintf(stdout, "NOTICE: after writing into a previous MADV_DONTNEED page from which we read before, a page will be allocated and displayed as RSS in pmap!\n");
   getchar();
 
   if (mprotect(&map[ps * NR_PAGES - 2 * ps], ps * 2, PROT_NONE) == -1) err(1, "mprotect");
   fprintf(stdout, "mprotected two page at %p to PROT_NONE\n", &map[ps * NR_PAGES - 2 * ps]);
   rss(map, ps * NR_PAGES);
+  fprintf(stdout, "NOTICE: this doesn't change the mincore output. In pmap we see a new address range but the pages are still allocated!\n");
   getchar();
 
   if (mprotect(&map[ps * NR_PAGES - 2 * ps], ps * 2, PROT_READ | PROT_WRITE) == -1) err(1, "mprotect");
   fprintf(stdout, "mprotected two page at %p to PROT_READ | PROT_WRITE\n", &map[ps * NR_PAGES - 2 * ps]);
   rss(map, ps * NR_PAGES);
+  fprintf(stdout, "NOTICE: this merges the previously split address range again as can be seen in the pmap output!\n");
   getchar();
 
   fprintf(stdout, "map[%d] == *%p == %d\n", ps * NR_PAGES - 2 * ps, &map[ps * NR_PAGES - 2 * ps], map[ps * NR_PAGES - 2 * ps]);
   rss(map, ps * NR_PAGES);
+  fprintf(stdout, "NOTICE: reading from a previously `mprotect(PROT_NONE)` page returns the original content!\n");
   getchar();
 
 }

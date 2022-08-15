@@ -30,8 +30,15 @@ int main(int argc, char **argv) {
 
   int fd;
   const char *file = argc > 1 ? argv[1] : "test.txt";
-  if ((fd = open(file, O_RDONLY)) == -1) err(1, "open");
+  if ((fd = open(file, O_RDONLY)) == -1) {
+    fprintf(stdout, "\nCreate a large enough input file:\n"
+            "(e.g. `for i in {1..65536}; do echo -n '01234567' >> %s; done`)\n\n", file);
+    err(1, "%s", file);
+  }
   fprintf(stdout, "Opened %s for reading\n", file);
+
+  fprintf(stdout, "\nRun `echo 1 > /proc/sys/vm/drop_caches` to clean the page cache\n");
+  getchar();
 
   char *map;
   const int size = ps * NR_PAGES;
@@ -48,19 +55,19 @@ int main(int argc, char **argv) {
   int count;
   if ((count = read(fd, buf, sizeof(buf))) == -1) err(1, "read");
 
-  fprintf(stdout, "Reading first %d bytes from %s with 'read() to buf (buf[0]=%c)'\n", count, file, buf[0]);
+  fprintf(stdout, "Reading first %d bytes from %s with 'read() to buf (buf[0]=%c, file pos=%ld)'\n", count, file, buf[0], lseek(fd, 0, SEEK_CUR));
   rss(map, ps * NR_PAGES);
   getchar();
 
   for (int i=1; i < ps * NR_PAGES / 4 / 512; i++) {
     if ((count += read(fd, buf, sizeof(buf))) == -1) err(1, "read");
   }
-  fprintf(stdout, "Reading first %d (%dkb) bytes from %s\n", count, count / 1024, file);
+  fprintf(stdout, "Reading up to %d (%dkb) bytes from %s (file pos=%ld)\n", count, count / 1024, file, lseek(fd, 0, SEEK_CUR));
   rss(map, ps * NR_PAGES);
   getchar();
 
   if ((count = read(fd, buf, sizeof(buf))) == -1) err(1, "read");
-  fprintf(stdout, "Reading %d more bytes from %s\n", count,  file);
+  fprintf(stdout, "Reading %d more bytes from %s (file pos=%ld)\n", count,  file, lseek(fd, 0, SEEK_CUR));
   rss(map, ps * NR_PAGES);
   getchar();
 
